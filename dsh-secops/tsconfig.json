@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "ES2023",
+      "ESNext.Disposable",
+      "DOM"
+    ],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": false,
+    "types": [
+      "node"
+    ],
+    "preserveSymlinks": true
+  },
+  "include": [
+    "src/**/*.ts"
+  ]
+}

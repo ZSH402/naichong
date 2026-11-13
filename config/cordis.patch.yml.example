@@ -1,0 +1,120 @@
+# 项目 profile 的用户 patch 层 —— 在 dsh-base 与 dsh-headless 之后叠加。
+#
+# 唯一目的：显式指定 permission 的 defaultPreset。
+# 破甲把 sandbox 默认改成 danger-full-access、approval 改成 never 之后，
+# permission-presets 从「当前生效的 sandbox/approval」推导不出预设组合，
+# 推导结果是 "custom"，于是构造期抛错、整个 permission 服务不激活。
+# 显式给 defaultPreset 就绕过推导。
+- id: permission
+  config:
+    defaultPreset: danger-full-access
+
+# ── 外部能力接入（2026-11-10）─────────────────────────────
+# subagent-claude-code：把 Claude Code 当一次性无交互子 agent 跑。
+# 用它自带的 bundle patch 内容（id 必须与上游一致，否则工具名不匹配）。
+- insert:
+    - id: subagent-claude-code
+      name: '@deepseek-ai/dsh-subagent-claude-code'
+    - id: tool-subagent-claude-code
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: claude-code
+        toolName: subagent_claude_code
+        maxDepth: provider-managed
+    # subagent-acp 需要 command（要拉起的 ACP agent 可执行文件）才能校验通过。
+    # 现在没有具体的 ACP agent，挂上只会让整个条目校验失败，故留空待用：
+    #
+    # - id: subagent-acp
+    #   name: '@deepseek-ai/dsh-subagent-acp'
+    #   config:
+    #     command: ['/path/to/acp-agent']
+    # - id: tool-subagent-acp
+    #   name: '@deepseek-ai/dsh-tool-subagent'
+    #   config: { provider: acp, toolName: subagent_acp, maxDepth: provider-managed }
+    # Claude Code hooks 桥：configPath 指向已有的 hooks 配置才生效。
+    # 没有该文件时插件挂载但不会触发任何钩子（安全降级）。
+    - id: hooks-claude-code
+      name: '@deepseek-ai/dsh-hooks-claude-code'
+      config:
+        configPath: /root/proj/home/hooks.json
+
+# ── 安全作业层（dsh-secops）───────────────────────────────
+# 这一层不是工具集合，是把「证据闭包」变成代码约束：
+#   范围闸/预算闸（guard，不可推翻）→ 声明式证据（claim_*）→ 复现校验（strict digest）
+#   → 方向级 agent 调度（同方向多候选，失败自动降级）。
+# 产物由 dsh-secops/sync-to-runtime.sh 同步进 dsh/node_modules。
+- insert:
+    - id: secops
+      name: dsh-secops
+      config:
+        # 范围闸 + 能力闸：这次是 CTF，目标只有本机靶场。
+        # 白名单收窄到本地，同时按工具名封掉联网搜索——
+        # 「不许上网找答案」必须落成能力层面的缺失，不能靠提示。
+        allowedHosts: [ '127.0.0.1', 'localhost' ]
+        deniedTools: [ 'web_search', 'web_fetch' ]
+        provenance:
+          enabled: true
+          store: /root/proj/home/secops/claims.jsonl
+        queue:
+          enabled: true
+          file: /root/proj/home/secops/queue.jsonl
+          evidenceRoot: /root/proj/home/secops/evidence
+          concurrency: 2
+          timeoutMs: 120000
+        agentDispatch:
+          enabled: true
+          maxAttempts: 2
+          overallTimeoutMs: 300000
+          costBudget: 10
+        # 时间信用：基础 30 分钟，每次实质进展续 10 分钟，上限 2 小时。
+        # 进展由 ClaimStore 判定（带 falsifier 的假设 / 过锚点校验的证据 / 证伪落库），
+        # 模型自己说「有线索」不续期。
+        timeCredit:
+          enabled: true
+          baseMs: 1800000
+          grantMs: 600000
+          maxMs: 7200000
+          grantCooldownMs: 120000
+          warnAtMs: 300000
+        # MCP server：CyberStrikeAI 暴露 81 个工具，补上 ghidra/linpeas/sqlmap 等缺口。
+        mcp:
+          enabled: true
+          command:
+            - /root/proj/agents/cyberstrike/CyberStrikeAI-main/cyberstrike-mcp
+            - -config
+            - /root/proj/agents/cyberstrike/CyberStrikeAI-main/config.example.yaml
+          cwd: /root/proj/agents/cyberstrike/CyberStrikeAI-main
+          timeoutMs: 30000
+        # ARTEX 专项执行者：给目标、拿 findings，编排仍在本机。
+        # 密码是首次部署时 /api/auth/init 设的。
+        artex:
+          enabled: true
+          baseUrl: http://127.0.0.1:8787
+          password: ${ARTEX_PASSWORD:?ARTEX_PASSWORD 未设置}
+        # 三公：丞相（分析）/ 太尉（调度）/ 御史大夫（风控）
+        council:
+          enabled: true
+          rateMaxPerWindow: 6
+          breakerThreshold: 3
+          # 空数组表示不做范围约束；填了就只允许这些主机
+          allowedHosts: []
+- id: locale
+  name: "@deepseek-ai/dsh-client-locale"
+  config:
+    preference: zh
+
+# ── SecOps 面板（纯前端，后端不动）─────────────────────────────
+# 只读 session projection `secopsProvenance`，不新增任何 host 侧服务。
+- insert:
+    - id: secops-ui
+      name: '@dsh-secops/client-ui-secops'
+- id: ui-settings-general
+  name: "@deepseek-ai/dsh-client-ui-settings-general"
+  config:
+    welcomeNoticeVersion: 2026-09-28.1
+- id: ui-theme
+  name: "@deepseek-ai/dsh-client-ui-theme"
+  config:
+    fontSize: 16
+    codeFontSize: 12
+    terminalFontSize: 15

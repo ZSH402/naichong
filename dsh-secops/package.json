@@ -1,0 +1,22 @@
+{
+  "name": "dsh-secops",
+  "version": "0.1.0",
+  "description": "Security-test orchestration policy layer for the DeepSeek Harness: scope guard, budget guard, and a pre-step stop condition.",
+  "type": "module",
+  "private": true,
+  "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": ["dist", "cordis.patch.yml"],
+  "dsh": {
+    "bundle": "cordis.patch.yml"
+  },
+  "scripts": {
+    "check": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

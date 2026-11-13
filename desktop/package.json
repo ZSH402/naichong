@@ -1,0 +1,12 @@
+{
+  "name": "dsh-secops-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "electron": "^45.3.1"
+  }
+}

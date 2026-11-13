@@ -1,0 +1,14 @@
+# dsh-secops bundle patch: mounts the policy layer beside dsh-base.
+# Insert-only — the package contributes guards and a pre-step listener and
+# replaces no existing row. Configuration is meant to be overridden by the
+# profile's own cordis.patch.yml or a --patch overlay.
+
+- insert:
+    - id: secops
+      name: 'dsh-secops'
+      config:
+        allowedHosts: []
+        maxToolCalls: 300
+        maxWallClockMs: 900000
+        maxSteps: 60
+        logDecisions: true

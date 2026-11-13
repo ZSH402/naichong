@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=DSH SecOps
+Name[zh_CN]=DSH 安全作业台
+Comment=Heterogeneous security-test orchestration with evidence closure
+Comment[zh_CN]=异构安全测试编排：结论带证据链
+Exec=/opt/dsh-desktop/launch.sh
+Icon=/opt/dsh-desktop/icon.png
+Terminal=false
+StartupWMClass=electron
+Categories=Development;Security;Network;
+Keywords=security;pentest;agent;dsh;

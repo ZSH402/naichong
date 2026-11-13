@@ -1,0 +1,26 @@
+{
+  "name": "@dsh-secops/client-ui-secops",
+  "description": "SecOps panel: claim evidence chain, verification tier, credit ledger, detector calibration",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "slots",
+        "locale"
+      ],
+      "platform": "web"
+    }
+  }
+}
