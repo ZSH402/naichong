@@ -92,6 +92,10 @@ python3 orchestrator.py --target example.com --mode blackbox --domain web \
 | 主要误报源 | 版本号当结论、单次差异当漏洞 | 「看起来危险」当「实际可利用」 |
 | 典型高估 | 影响范围 | 可达性 |
 
+完整参数：
+
+![cli](docs/img/5_cli.png)
+
 ## 跑起来是什么样
 
 以下每张图都是**实际执行输出**。生成方式是把命令的真实 stdout 套上终端外观再截图，图中每个字符都能被重跑复现。
