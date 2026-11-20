@@ -1,0 +1,15 @@
+# 奶虫 · 运行时覆盖层
+#
+# 这里只做「放开工具与网络」这一件事，**不承担范围控制**。
+# 范围控制是 policy/scope.rego 的职责，那份策略默认拒绝、可单测、可审计。
+#
+# 上一版把 allowedHosts 和 deniedTools 都清空，理由是"比赛靶机域名随机、
+# 没法预先列白名单"。那是权宜：等于拆掉了唯一一道硬边界。真实渗透里这个位置
+# 必须留给 Rego 闸——它读 input.scope，能对每个动作判决，而不是靠一个静态列表。
+#
+# 为什么仍要放开工具的 deniedTools：练习期曾封 web_search / web_fetch 防抄答案，
+# 但真实作业里查 CVE、查工具语法、查协议细节是正当能力，不是作弊。
+- id: secops
+  config:
+    allowedHosts: []
+    deniedTools: []

@@ -1,13 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# 运行时产物（数据与状态不入库）
+engine/findings/
+engine/state/
+engine/attachments/
+engine/scope/mine.json
+
+# Rust 编译产物
+engine/runner/target/
+
+# Node
 node_modules/
-dist/
 *.log
-.DS_Store
-# 运行时状态与凭据，绝不入库
-credentials.json
-.credentials.yaml
-*.jsonl
-.secops/
-secops/
-workspace/
-sessions/
-storages/
