@@ -126,7 +126,7 @@ python3 orchestrator.py --target example.com --mode blackbox --domain web \
 
 ## 和别的方案比
 
-| | 裸 LLM + 工具 | Agent 框架（LangGraph 等） | 通用安全扫描器 | 奶虫 |
+| | 裸 LLM + 工具 | Agent 框架 | 通用安全扫描器 | 奶虫 |
 |---|---|---|---|---|
 | 能调工具 | ✅ | ✅ | ✅ | ✅ |
 | 结论有验证档位 | ❌ | ❌ | 部分 | ✅ 四档 |
