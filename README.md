@@ -33,6 +33,10 @@ LLM agent 做安全测试，最常见的失败不是「找不到漏洞」，而�
 
 两者可以独立使用。只用 dsh-secops 时你得到的是「结论不会太假」；只用 engine 时你得到的是「作业不会跑飞」。一起用时，engine 每轮的产出仍要过 dsh-secops 的闸。
 
+![架构](docs/img/0_arch.png)
+
+*上图是真实模块依赖，不是示意：`dsh-secops` 的验证档位把结论写进 `models.py` 的契约，再由 `orchestrator.py` 每轮驱动 `store.py` / `graph.py` / `runner/`。*
+
 ## 核心机制
 
 ### 微观层（dsh-secops）
@@ -61,6 +65,34 @@ LLM agent 做安全测试，最常见的失败不是「找不到漏洞」，而�
 | 数据查询 | DuckDB 直读扫描产物 JSONL，回答「还有哪些资产完全没碰」 |
 | 攻击路径 | Kùzu 图做可达性、最短路径、枢纽分析 |
 | 受监管执行 | Rust + cgroup v2：硬限额、双超时判据、遍历 `cgroup.procs` 清理逃逸进程 |
+
+## 跑起来是什么样
+
+以下每张图都是**实际执行输出**，不是设计稿。图的生成方式是把命令的真实 stdout 套上终端外观再截图，所以图中每个字符都能被重跑复现。
+
+**扫描产物入库与查询**（DuckDB 直读 JSONL，不建表导入）：
+
+![store](docs/img/1_ingest.png)
+
+三层标识让「同一个东西的不同视角」能挂在一起——`10.0.0.5:80` 与 `http://10.0.0.5/` 通过 `contains` 边相连，而不是在图上变成两个互不相连的节点：
+
+![ports](docs/img/2_ports.png)
+
+「还没碰过的资产」是每轮最该看的清单。孤岛判定只看攻击跳转与发现，不看包含关系——一个端口挂在主机下不代表它被探查过：
+
+![untested](docs/img/3_untested.png)
+
+**攻击路径推理**（Kùzu 图，BFS 剪枝求最短路径）：
+
+![graph](docs/img/4_graph.png)
+
+**授权范围策略单测**（Rego，默认拒绝）：
+
+![rego](docs/img/6_rego.png)
+
+**受监管执行**（Rust + cgroup v2）——第二行是 `setsid` 逃逸场景，`killed:1` 就是 `killpg` 够不到、只能靠 cgroup 枚举揪出来的那个：
+
+![runner](docs/img/7_runner.png)
 
 ## 目录
 

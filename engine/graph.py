@@ -176,20 +176,40 @@ class AttackGraph:
         return counts
 
     def _read(self, name: str) -> list[dict[str, Any]]:
+        """读 JSONL 并在**读时**按主键去重。
+
+        JSONL 本身刻意是 append-only 的：同一条资产被多轮观测到就多写一行，
+        那是历史，不该在写的时候覆盖。但建图需要的是「当前视图」，
+        而 Kùzu 的主键约束不允许重复——所以去重放在这里，写侧保持纯粹。
+
+        这个 bug 是实测撞出来的：nmap 和 httpx 各跑一次，两边都会产出
+        host:10.0.0.5，建图直接报 duplicated primary key。
+        """
         p = os.path.join(self.root, f"{name}.jsonl")
         if not os.path.exists(p):
             return []
-        out = []
+        key_of = {"assets": "asset_id", "findings": "finding_id",
+                  "evidence": "evidence_id"}.get(name)
+        merged: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
         with open(p, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    out.append(json.loads(line))
+                    rec = json.loads(line)
                 except ValueError:
                     continue
-        return out
+                k = str(rec.get(key_of, "")) if key_of else ""
+                if not k:
+                    order.append(str(len(order)))     # 无主键的行原样保留
+                    merged[str(len(merged))] = rec
+                    continue
+                if k not in merged:
+                    order.append(k)
+                merged[k] = rec                       # 后写的覆盖前写的 = 更新的观测
+        return [merged[k] for k in order]
 
     # ---------- 查询 ----------
 
