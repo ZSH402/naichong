@@ -91,6 +91,25 @@ cordis 的 `prepend` 是 `unshift`，后注册者更靠前——`agent/pre-step`
 
 行为冒烟覆盖：配置归一化、目标提取（URL / bash 命令 / 非 URL 参数 / null）、范围内放行、范围外拒绝、IP 白名单、预算计数到点拒绝、pre-step 注册、步数超限 reject、上游 reject 不被覆盖。
 
+### 依赖与构建
+
+**本包是 DSH 源码树的插件，不是独立 npm 包。** 运行时依赖全部由宿主提供，
+本地以软链形式接进 `node_modules`（版本必须与宿主一致，npm 上的同名包导出对不上）：
+
+```sh
+cd dsh-secops
+ln -s /path/to/dsh/pkgs/cordis/package    node_modules/@deepseek-ai/cordis
+ln -s /path/to/dsh/pkgs/tools/package     node_modules/@deepseek-ai/dsh-tools
+ln -s /path/to/dsh/pkgs/session/package   node_modules/@deepseek-ai/dsh-session
+ln -s /path/to/dsh/node_modules/zod       node_modules/zod    # zod 跟随宿主版本（4.x）
+npm i -D typescript @types/node
+```
+
+`peerDependencies` 里已声明这四项。**没有对应版本的 DSH 源码树就无法从零编译**——
+这一点如实写明，不假装可独立复现。
+
+已知版本约束：决策记录依赖 `appendPluginRecord`，**DSH 0.1.5 不兼容，需 0.2.2**。
+
 命令：
 
 ```sh
