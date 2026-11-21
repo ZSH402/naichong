@@ -26,7 +26,7 @@ const storePath = path.join(root, 'claims.jsonl')
   store.attach(c.id, {
     ref: 'evidence://req-1',
     pathKey: 'http:differential',
-    executed: 'curl -X PUT http://t/api/user -d role=admin',
+    executed: 'curl -X PUT http://t/api/user -d role=admin', executedTrusted: true,
   })
   check('first session: claim created', store.get(c.id)?.status === 'partial', store.get(c.id)?.status)
   check('snapshot file written', fs.existsSync(storePath) && fs.statSync(storePath).size > 0)
@@ -48,7 +48,7 @@ const storePath = path.join(root, 'claims.jsonl')
     store.attach(c.id, {
       ref: 'evidence://req-2',
       pathKey: 'role:other-user',
-      executed: 'curl -X PUT -H Cookie:other http://t/api/user -d role=admin',
+      executed: 'curl -X PUT -H Cookie:other http://t/api/user -d role=admin', executedTrusted: true,
     })
     check('cross-session attach promotes to confirmed', store.get(c.id)?.status === 'confirmed', store.get(c.id)?.status)
   }

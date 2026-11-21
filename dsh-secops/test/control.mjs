@@ -158,7 +158,7 @@ const check = (l, ok, d) => {
   const proof = store.attach(id, {
     ref: '/evidence/checksec-target.txt',
     pathKey: 'tool:checksec',
-    executed: 'checksec --file=/opt/target',
+    executed: 'checksec --file=/opt/target', executedTrusted: true,
     role: 'proof',
   })
   check('proof attached', proof.ok === true, proof)

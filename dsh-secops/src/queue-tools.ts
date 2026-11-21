@@ -284,8 +284,11 @@ export function createEvidenceArchiver(claimStore: AttachCapable): EvidenceArchi
         ref: `task:${task.id}`,
         pathKey: `task:${task.kind}`,
         note: `queue task ${task.kind} exit=${String(task.exitCode)} evidence=${task.evidenceDir}`,
-        ...(task.argv === undefined ? {} : { executed: task.argv.join(' ') }),
-        ...(artifact === undefined ? {} : { artifact }),
+        // task.argv 来自队列里的真实任务记录，不是模型现编的 → 标记可信。
+        ...(task.argv === undefined ? {} : { executed: task.argv.join(' '), executedTrusted: true }),
+        // artifact 是 worker 落盘的真实产物（task.evidenceDir），由系统读取，
+        // 不是模型传入的文本 → 显式声明可信来源。
+        ...(artifact === undefined ? {} : { artifact, artifactTrusted: true }),
         ...(task.argv === undefined
           ? {}
           : {

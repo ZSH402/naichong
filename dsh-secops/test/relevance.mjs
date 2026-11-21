@@ -44,7 +44,7 @@ const kinds = (anchors) => anchors.map((a) => `${a.kind}:${a.value}`).sort()
 {
   const v = checkEvidenceRelevance({
     claim: 'PUT /api/user 允许修改他人角色',
-    executed: 'node -e "console.log(7)"',
+    executed: 'node -e "console.log(7)"', executedTrusted: true,
   })
   check('unrelated command is rejected', v.ok === false, v)
   check('strength none', v.strength === 'none', v.strength)
@@ -55,7 +55,7 @@ const kinds = (anchors) => anchors.map((a) => `${a.kind}:${a.value}`).sort()
 {
   const v = checkEvidenceRelevance({
     claim: 'PUT /api/user 允许修改他人角色',
-    executed: 'curl -X PUT https://t/api/user -d role=admin',
+    executed: 'curl -X PUT https://t/api/user -d role=admin', executedTrusted: true,
   })
   check('matching command accepted', v.ok === true, v)
   check('strength strong', v.strength === 'strong', v.strength)
@@ -66,7 +66,7 @@ const kinds = (anchors) => anchors.map((a) => `${a.kind}:${a.value}`).sort()
 {
   const v = checkEvidenceRelevance({
     claim: 'PUT /api/user 允许修改他人角色',
-    executed: '/opt/scan.sh target',
+    executed: '/opt/scan.sh target', executedTrusted: true,
     artifact: 'PUT /api/user -> 200 OK role=admin',
   })
   check('artifact-only evidence accepted as weak', v.ok === true && v.strength === 'weak', v)
@@ -77,7 +77,7 @@ const kinds = (anchors) => anchors.map((a) => `${a.kind}:${a.value}`).sort()
 {
   const v = checkEvidenceRelevance({
     claim: 'PUT /api/user 允许修改他人角色',
-    executed: 'node -e "console.log(7)"',
+    executed: 'node -e "console.log(7)"', executedTrusted: true,
     // 旧实现里这个字段能单独成立；现在它根本不在判据里
     ...(/** @type {any} */ ({ observed: 'PUT /api/user role change confirmed' })),
   })
@@ -87,11 +87,11 @@ const kinds = (anchors) => anchors.map((a) => `${a.kind}:${a.value}`).sort()
 
 // ── 5. 断言没有锚点
 {
-  const strict = checkEvidenceRelevance({ claim: '存在越权问题', executed: 'anything' })
+  const strict = checkEvidenceRelevance({ claim: '存在越权问题', executed: 'anything', executedTrusted: true })
   check('anchorless claim rejected in strict mode', strict.ok === false, strict)
   check('anchorless reason explains why', typeof strict.reason === 'string' && strict.reason.includes('anchor'), strict.reason)
 
-  const loose = checkEvidenceRelevance({ claim: '存在越权问题', executed: 'anything' }, { strict: false })
+  const loose = checkEvidenceRelevance({ claim: '存在越权问题', executed: 'anything', executedTrusted: true }, { strict: false })
   check('anchorless claim allowed in non-strict mode', loose.ok === true, loose)
   check('non-strict still marks weak', loose.strength === 'weak', loose.strength)
 }
@@ -100,7 +100,7 @@ const kinds = (anchors) => anchors.map((a) => `${a.kind}:${a.value}`).sort()
 {
   const v = checkEvidenceRelevance({
     claim: 'put /API/User 允许改角色',
-    executed: 'curl -X PUT http://x/API/User',
+    executed: 'curl -X PUT http://x/API/User', executedTrusted: true,
   })
   check('case-insensitive matching', v.ok === true && v.strength === 'strong', v)
 }
@@ -109,7 +109,7 @@ const kinds = (anchors) => anchors.map((a) => `${a.kind}:${a.value}`).sort()
 {
   const v = checkEvidenceRelevance({
     claim: 'DELETE /api/order 可删除他人订单',
-    executed: 'curl http://t/api/order',
+    executed: 'curl http://t/api/order', executedTrusted: true,
   })
   check('any single anchor match is enough', v.ok === true, v)
 }

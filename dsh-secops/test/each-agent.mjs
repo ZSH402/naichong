@@ -173,7 +173,7 @@ if (fs.existsSync(csBin)) {
 
 // ── 外部执行体：ARTEX ──
 {
-  const client = new ArtexClient({ baseUrl: 'http://127.0.0.1:8787', password: process.env.ARTEX_PASSWORD ?? '' })
+  const client = new ArtexClient({ baseUrl: 'http://127.0.0.1:8787', password: process.env.ARTEX_PASSWORD ?? 'artex-local-dev-2026' })
   if (await client.health()) {
     const a = createArtexAdapter(client, { logger: { info: () => {}, warn: () => {} } })
     const c = new AbortController()

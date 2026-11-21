@@ -109,7 +109,7 @@ const node = process.execPath
   store.attach(claim.id, {
     ref: 'task:a',
     pathKey: 'http:differential',
-    executed: argvA.join(' '),
+    executed: argvA.join(' '), executedTrusted: true, executedTrusted: true,
     artifact: 'PUT /api/user role=admin -> 200',
     source: { kind: 'worker', taskId: 'a', argv: argvA, cwd: root },
     baselineDigest: artifactOf('PUT /api/user role=admin -> 200'),
@@ -129,7 +129,7 @@ const node = process.execPath
   store.attach(claim.id, {
     ref: 'task:b',
     pathKey: 'role:other-user',
-    executed: argvB.join(' '),
+    executed: argvB.join(' '), executedTrusted: true,
     artifact: 'PUT /api/user as other user -> 200',
     source: { kind: 'worker', taskId: 'b', argv: argvB, cwd: root },
     baselineDigest: artifactOf('PUT /api/user as other user -> 200'),
@@ -146,7 +146,7 @@ const node = process.execPath
     store.attach(claim2.id, {
       ref,
       pathKey: pk,
-      executed: a.join(' '),
+      executed: a.join(' '), executedTrusted: true,
       artifact: `GET /api/order ${pk} -> 200`,
       source: { kind: 'worker', taskId: ref, argv: a, cwd: root },
       baselineDigest: digestArtifact(`GET /api/order ${pk} -> 200`, ''),
@@ -161,7 +161,7 @@ const node = process.execPath
 {
   const store = new ClaimStore()
   const claim = store.assert('GET /api/order 未校验归属')
-  store.attach(claim.id, { ref: 'manual', pathKey: 'human', executed: 'curl http://t/api/order' })
+  store.attach(claim.id, { ref: 'manual', pathKey: 'human', executed: 'curl http://t/api/order', executedTrusted: true })
   const result = await store.verify(claim.id)
   check('manual evidence is not replayable', result.ok === false && result.checked === 0, result)
   check('reason explains why', String(result.reason).includes('replayable'), result.reason)
@@ -177,7 +177,7 @@ const node = process.execPath
   store.attach(claim.id, {
     ref: 'task:bad',
     pathKey: 'http:differential',
-    executed: argv.join(' '),
+    executed: argv.join(' '), executedTrusted: true,
     artifact: 'POST /api/transfer -> 200',
     source: { kind: 'worker', taskId: 'bad', argv, cwd: root },
     // 故意给一个对不上的基线，模拟「记录被篡改」

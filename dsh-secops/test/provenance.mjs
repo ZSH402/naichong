@@ -49,13 +49,13 @@ const check = (label, ok, detail) => {
   const again = store.assert('GET /api/order?id= 未校验归属')
   check('assert is idempotent by text', again.id === c.id && store.query().length === 1)
 
-  store.attach(c.id, { ref: 'evidence://req-1', pathKey: 'http:idor', executed: 'curl http://t/api/order?id=2' })
+  store.attach(c.id, { ref: 'evidence://req-1', pathKey: 'http:idor', executed: 'curl http://t/api/order?id=2', executedTrusted: true })
   check('after one evidence => partial', store.get(c.id)?.status === 'partial', store.get(c.id)?.status)
 
-  store.attach(c.id, { ref: 'evidence://req-2', pathKey: 'http:idor', executed: 'curl http://t/api/order?id=3' })
+  store.attach(c.id, { ref: 'evidence://req-2', pathKey: 'http:idor', executed: 'curl http://t/api/order?id=3', executedTrusted: true })
   check('second same-path evidence keeps partial', store.get(c.id)?.status === 'partial', store.get(c.id)?.status)
 
-  store.attach(c.id, { ref: 'evidence://req-3', pathKey: 'role:other-user', executed: 'curl -H Cookie:other http://t/api/order?id=4' })
+  store.attach(c.id, { ref: 'evidence://req-3', pathKey: 'role:other-user', executed: 'curl -H Cookie:other http://t/api/order?id=4', executedTrusted: true })
   check('cross-path evidence => confirmed', store.get(c.id)?.status === 'confirmed', store.get(c.id)?.status)
 
   const settled = store.settledIds()
@@ -66,7 +66,7 @@ const check = (label, ok, detail) => {
 {
   const store = new ClaimStore()
   const c = store.assert('PUT /api/user 允许把 role 改成 admin')
-  store.attach(c.id, { ref: 'e1', pathKey: 'http:differential', executed: 'curl -X PUT http://t/api/user -d role=admin' })
+  store.attach(c.id, { ref: 'e1', pathKey: 'http:differential', executed: 'curl -X PUT http://t/api/user -d role=admin', executedTrusted: true })
   store.refute(c.id, { ref: 'e2', pathKey: 'http:differential', note: '服务端校验拒绝' })
   check('refuted status set', store.get(c.id)?.status === 'refuted', store.get(c.id)?.status)
 
@@ -84,7 +84,7 @@ const check = (label, ok, detail) => {
   const store = new ClaimStore()
   const a = store.assert('claim A')
   const b = store.assert('claim B')
-  store.attach(a.id, { ref: 'x', pathKey: 'p1', executed: 'claim A probe' })
+  store.attach(a.id, { ref: 'x', pathKey: 'p1', executed: 'claim A probe', executedTrusted: true })
   check('B untouched by A evidence', store.get(b.id)?.independentPaths === 0, store.get(b.id))
   check('two claims tracked', store.query().length === 2)
 }
@@ -98,7 +98,7 @@ const check = (label, ok, detail) => {
   const unrelated = store.attach(c.id, {
     ref: 'task:probe',
     pathKey: 'task:probe',
-    executed: 'node -e "console.log(7)"',
+    executed: 'node -e "console.log(7)"', executedTrusted: true,
   })
   check('unrelated evidence rejected', unrelated.ok === false, unrelated)
   check('rejection explains the missing anchors', String(unrelated.reason).includes('/api/user'), unrelated.reason)
@@ -107,7 +107,7 @@ const check = (label, ok, detail) => {
   const strong = store.attach(c.id, {
     ref: 'task:real',
     pathKey: 'task:real',
-    executed: 'curl -X PUT https://t/api/user -d role=admin',
+    executed: 'curl -X PUT https://t/api/user -d role=admin', executedTrusted: true,
   })
   check('matching evidence accepted', strong.ok === true, strong)
   check('status advanced via verified path', store.get(c.id)?.status === 'partial', store.get(c.id)?.status)
@@ -117,6 +117,7 @@ const check = (label, ok, detail) => {
   const weak = store.attach(c.id, {
     ref: 'task:weak',
     pathKey: 'role:other-user',
+    // 故意不标 trusted：这条测的是「仅声明覆盖」只能算 weak
     executed: '/opt/scan.sh',
     artifact: 'PUT /api/user -> 200',
   })
@@ -127,7 +128,7 @@ const check = (label, ok, detail) => {
   const narrated = store.attach(c.id, {
     ref: 'task:narrated',
     pathKey: 'task:narrated',
-    executed: 'node -e "console.log(7)"',
+    executed: 'node -e "console.log(7)"', executedTrusted: true,
   })
   check('unrelated execution rejected even with a matching claim', narrated.ok === false, narrated)
 }

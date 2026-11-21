@@ -23,8 +23,8 @@ const session = ctx.sessions.create()
 
 const store = new ClaimStore(session)
 const c = store.assert('POST /api/transfer 接受负数金额', { falsifier: '负数被服务端拒绝则假设不成立' })
-store.attach(c.id, { ref: 'evidence://a', pathKey: 'http:differential', executed: 'curl -X POST http://t/api/transfer -d amount=-5' })
-store.attach(c.id, { ref: 'evidence://b', pathKey: 'tool:recompute', executed: 'recompute POST /api/transfer amount=-5 balance' })
+store.attach(c.id, { ref: 'evidence://a', pathKey: 'http:differential', executed: 'curl -X POST http://t/api/transfer -d amount=-5', executedTrusted: true })
+store.attach(c.id, { ref: 'evidence://b', pathKey: 'tool:recompute', executed: 'recompute POST /api/transfer amount=-5 balance', executedTrusted: true })
 await sleep(500)
 
 const state = readProvenance(ctx.sessionProjections, session)

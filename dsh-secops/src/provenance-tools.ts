@@ -206,14 +206,26 @@ export class ClaimStore {
     evidence: Omit<Evidence, 'addedAt' | 'relevance' | 'observed' | 'replay'> & {
       executed?: string
       artifact?: string
+      /**
+       * `executed` 是否来自系统记录的真实 argv。
+       * 只有系统内部调用（如队列任务）会设它；模型经工具无法传入。
+       */
+      executedTrusted?: boolean
+      /**
+       * `artifact` 是否由系统读取（而不是调用方传入的文本）。
+       * 与 executedTrusted 同理：只有系统设定的才被信任。
+       */
+      artifactTrusted?: boolean
     },
   ): AttachResult {
     const prev = this.claims.get(claimId)
     if (prev === undefined) return { ok: false, reason: `unknown claim: ${claimId}` }
 
-    const { executed: _e, artifact: _a, ...rest } = evidence
+    const { executed: _e, artifact: _a, executedTrusted: _t, artifactTrusted: _at, ...rest } = evidence
     void _e
     void _a
+    void _t
+    void _at
 
     // 校准证据跑的是本地对照样本（例如 /usr/bin/ls），它**不可能**触及目标锚点。
     // 对它做相关性检查必然判 none，然后被当成「不相关证据」拒收——这不是质量问题，
@@ -235,7 +247,15 @@ export class ClaimStore {
         {
           claim: prev.claim,
           ...(evidence.executed === undefined ? {} : { executed: evidence.executed }),
+          // 只有系统内部调用才会设这一位（见 queue-tools 的 task.argv）。
+          // 模型经 claim_evidence 无法传入，所以自述永远拿不到 strong。
+          executedTrusted: evidence.executedTrusted === true,
           ...(evidence.artifact === undefined ? {} : { artifact: evidence.artifact }),
+          // 必须由调用方显式声明来源可信。早先这里写的是
+          // `artifactTrusted: evidence.artifact !== undefined`——只要有 artifact 就信，
+          // 于是直接调 store.attach({artifact:'...'}) 传入的文本也被当成系统产物。
+          // 信任来源不能推断，只能由系统内部置位。
+          artifactTrusted: evidence.artifactTrusted === true,
           ref: evidence.ref,
         },
         { strict: this.strictRelevance },
@@ -254,6 +274,8 @@ export class ClaimStore {
         relevance: { strength, matched },
         addedAt: Date.now(),
       },
+      // 用 verified 模式（按 relevance 推进），但 deriveStatus 里加了一道硬门槛：
+      // **confirmed 必须至少有一条 replay.verified**。见 provenance.ts 的说明。
       { mode: 'verified' },
     )
     if (next === prev) return { ok: true, claim: prev, rejected: 'duplicate' }
@@ -554,11 +576,12 @@ export function provenanceTools(store: ClaimStore): ToolDefinition[] {
         claim_id: { type: 'string' },
         ref: { type: 'string', description: 'Evidence reference: file path, evidence id, request hash.' },
         path_key: { type: 'string', description: 'Independence key, e.g. "http:differential", "tool:recompute", "role:other-user".' },
-        executed: {
+        evidence_file: {
           type: 'string',
           description:
-            'The command or request line that produced this evidence, e.g. "curl -X PUT https://t/api/user -d role=admin". ' +
-            'It must mention one of the claim anchors; a self-written narration of what you think you observed is not accepted.',
+            'Path to the file holding the raw output (stdout/stderr/response body) that proves this. ' +
+            'The system reads it and matches anchors against its CONTENT. ' +
+            'A self-written description is not accepted: relevance is decided by the file, not by your narration.',
         },
         note: { type: 'string' },
         asset_ids: {
@@ -590,17 +613,33 @@ export function provenanceTools(store: ClaimStore): ToolDefinition[] {
         ref: string
         path_key: string
         note?: string
-        executed?: string
+        evidence_file?: string
         role?: string
         asset_ids?: string[]
       }
       store.ensureSession(exec)
       const role = a.role === 'baseline' ? 'baseline' : a.role === 'control' ? 'control' : a.role === 'proof' ? 'proof' : undefined
+
+      // 证据内容从**文件**读，不接受模型传入的文本。
+      //
+      // 这条是整条链上最关键的一处。此前 `executed` 是模型填的字符串，
+      // 而 relevance=strong 完全由它决定 —— 配合 CONFIRM_THRESHOLD=2，
+      // 模型只要写两段含正确路径的"命令"，不需要真的发过任何请求，
+      // 断言就会被判 confirmed。relevance.ts 的注释早写了"必须由系统读取，
+      // 不能由模型传入"，但这条路径一直没落地。
+      let artifact: string | undefined
+      if (a.evidence_file !== undefined && a.evidence_file !== '') {
+        try {
+          artifact = fs.readFileSync(a.evidence_file, 'utf8').slice(0, 64 * 1024)
+        } catch (err) {
+          return { error: `evidence_file 无法读取（${a.evidence_file}）：${(err as Error).message}` }
+        }
+      }
       const result = store.attach(a.claim_id, {
         ref: a.ref,
         pathKey: a.path_key,
         ...(a.note === undefined ? {} : { note: a.note }),
-        ...(a.executed === undefined ? {} : { executed: a.executed }),
+        ...(artifact === undefined ? {} : { artifact, artifactTrusted: true }),
         ...(role === undefined ? {} : { role }),
       })
       if (!result.ok) return { error: result.reason }

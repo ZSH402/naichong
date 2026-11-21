@@ -13,6 +13,7 @@
  *     所以安全拦截一律走 guard，不走 pre-step。
  */
 
+import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { installBudgetGuard, installScopeGuard, installToolDenyGuard } from './guards.ts'
 import { installDecisionStage } from './decision.ts'
@@ -25,6 +26,9 @@ import { ClaimStore, installProvenanceTools } from './provenance-tools.ts'
 import { registerProvenanceProjection } from './provenance.ts'
 import { QueueRunner } from './queue-runner.ts'
 import { createEvidenceArchiver, installQueueTools } from './queue-tools.ts'
+import { SessionManager } from './session-manager.ts'
+import { sessionTools } from './session-tools.ts'
+import { installSessionGuard } from './session-guard.ts'
 import { installStallGuard } from './stall-guard.ts'
 import { installShortcutGuard } from './shortcut-guard.ts'
 import { installGuidanceGuard, GUIDANCE_FILENAME } from './guidance.ts'
@@ -299,6 +303,36 @@ export async function apply(ctx: Context, config?: SecopsConfig): Promise<void> 
       `secops: queue armed at ${resolved.queue.file} (concurrency=${resolved.queue.concurrency}, ` +
         `recovered=${recovered.length})`,
     )
+  }
+
+  // ── 交互式会话（IAT）──
+  //
+  // 让 agent 对长驻程序（gdb / nc / REPL）逐步发命令读响应，而不是每次起新进程。
+  // EnIGMA（arXiv 2409.16165）在 350 道 CTF 题上验证：交互式工具是最大的单点改进。
+  // 会话必须在插件卸载时全部回收——否则 gdb 和被调试程序会变成孤儿进程组。
+  {
+    const sessionLogDir = path.join(process.cwd(), '.dsh-secops', 'sessions')
+    const sessions = new SessionManager({
+      maxSessions: 4,
+      logDir: sessionLogDir,
+    })
+    ctx.effect(() => () => {
+      const alive = sessions.list().filter((x) => x.alive).length
+      if (alive > 0) {
+        ctx.logger.info(`secops/session: 卸载时仍存活 ${String(alive)} 个会话，强制回收`)
+      }
+      void sessions.closeAll()
+    })
+    for (const tool of sessionTools(sessions, { logDir: sessionLogDir })) ctx.tools.register(tool)
+    // 护栏：裸跑 gdb 会阻塞到超时，提示改用交互会话（只提醒不拒绝，见 session-guard.ts）
+    const sessionGuard = installSessionGuard(ctx, { logger: ctx.logger })
+    ctx.effect(() => () => {
+      const st = sessionGuard.stats()
+      if (st.nudges > 0) {
+        ctx.logger.info(`secops/session: ${String(st.nudges)} 次阻塞式 gdb 提示 / ${String(st.calls)} 次调用`)
+      }
+    })
+    ctx.logger.info(`secops: interactive sessions armed (max=4, logs=${sessionLogDir})`)
   }
 
   // 方向级调度：同一方向多个 agent，失败自动换下一个。

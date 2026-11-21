@@ -97,7 +97,19 @@ export interface RelevanceInput {
   /** 断言原文。 */
   readonly claim: string
   /** 证据的实际执行内容（命令 / argv / 请求行的拼接）。 */
+  /**
+   * 实际执行的命令/请求。
+   *
+   * ⚠️ 单独看它**不能**当证据：这是模型可以随便填的字符串。
+   * 只有 `executedTrusted === true`（上游确实拿到了真实的 argv）时才计入 strong。
+   * 而 `executedTrusted` 只能由系统设置——模型没有途径传入它。
+   */
   readonly executed?: string
+  /**
+   * `executed` 是否来自系统记录的真实 argv（例如队列任务的 task.argv）。
+   * 模型无法提供这一位，所以自述永远拿不到 strong。
+   */
+  readonly executedTrusted?: boolean
   /**
    * 执行产物摘要（stdout/stderr 片段）。**必须由系统读取，不能由模型传入**。
    *
@@ -107,6 +119,19 @@ export interface RelevanceInput {
   readonly artifact?: string
   /** 证据引用，用于诊断。 */
   readonly ref?: string
+  /**
+   * `artifact` 是否来自系统读取（而不是模型传入）。
+   *
+   * 为什么需要这一位：产物单独看无法自证——`echo "PUT /api/user 200"` 也能造出
+   * 含锚点的输出。但如果产物是**系统从模型指定路径读出来的文件**，它就至少
+   * 是一份真实存在的存档，人可以照着核查。这正是漏洞赏金平台接受截图/视频的
+   * 理由：不要求可重放，要求**内容可核查**。
+   *
+   * 所以两种产物的可信度不同：
+   *   - 系统读取的文件 → attested（可推进确认，但标注未重放）
+   *   - 模型传入的文本 → weak（不计入，等同自述）
+   */
+  readonly artifactTrusted?: boolean
 }
 
 /**
@@ -143,17 +168,33 @@ export function checkEvidenceRelevance(input: RelevanceInput, options: { strict?
 
   const inExecuted = anchors.filter((a) => executedText.includes(a.value.toLowerCase()))
   if (inExecuted.length > 0) {
-    return { ok: true, strength: 'strong', anchors, matched: inExecuted }
+    // 只有系统记录的真实 argv 才算强证据。模型自述的 executed 降级为 weak ——
+    // 它最多说明"我认为我执行过这个"，不能作为确认依据。
+    const trusted = input.executedTrusted === true
+    return {
+      ok: true,
+      strength: trusted ? 'strong' : 'weak',
+      anchors,
+      matched: inExecuted,
+      ...(trusted ? {} : {
+        reason: 'executed content was supplied as text, not from a system-recorded argv; treated as assertion',
+      }),
+    }
   }
 
   const inArtifact = anchors.filter((a) => artifactText.includes(a.value.toLowerCase()))
   if (inArtifact.length > 0) {
+    // 系统读取的真实产物文件 → attested，可以推进确认。
+    // 模型传入的文本 → weak，不计入（等同自述）。
+    const trusted = input.artifactTrusted === true
     return {
       ok: true,
-      strength: 'weak',
+      strength: trusted ? 'strong' : 'weak',
       anchors,
       matched: inArtifact,
-      reason: 'anchors appear only in the produced output, not in the executed content',
+      reason: trusted
+        ? 'anchors matched in evidence file read by the system (attested: not replayed)'
+        : 'anchors appear only in caller-supplied text, which cannot be distinguished from narration',
     }
   }
 

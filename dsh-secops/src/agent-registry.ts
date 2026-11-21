@@ -26,6 +26,12 @@ export type Direction =
   | 'code-audit'
   | 'crypto'
   | 'post-exploit'
+  /** Pwn：二进制利用。与 binary-reverse 的分界是「利用」还是「看懂」——
+   *  逆向关心这是什么，pwn 关心怎么打穿。 */
+  | 'pwn'
+  /** Misc：隐写、取证、文件雕刻、杂项密码。没有共同的方法论，
+   *  共同点只是「都不需要靶机实例」。 */
+  | 'misc'
 
 /** verdict 拿到的全部可判据。 */
 export interface VerdictContext {
@@ -748,6 +754,142 @@ export function nucleiVerdict(ctx: VerdictContext): { found: boolean; detail?: s
  * 「有发现」在这里指**加固缺失**——relro/canary/nx/pie 任一为 "no"。
  * `pie: "not_elf"` 表示不是 ELF，不算缺失。
  */
+/**
+ * 隐写检测的判据。
+ *
+ * zsteg 扫完没有任何嵌入时输出 `none`（或空）；命中时逐行形如
+ * `b1,rgb,lsb,xy .. text: "..."`。这里只认后半段的 `text:/file:/meta:`
+ * 标记——位平面名字本身不是证据，每个 PNG 都有位平面。
+ *
+ * 注意 PNG 的 chunk 名字（b1,rgba,msb）在正常图里也会出现，靠它判定必然误报，
+ * 这正是 `control` 用一张干净 PNG 校准的原因：干净图上它必须报 clean。
+ */
+export function stegoVerdict(ctx: VerdictContext): { found: boolean; detail?: string; class?: FindingClass } | undefined {
+  const out = `${ctx.stdout}`.trim()
+  if (out === '') {
+    return ctx.exitCode === 0 ? { found: false, class: 'clean', detail: 'no output' } : undefined
+  }
+  // ⚠️ 实测：zsteg 对一张纯渐变 PNG 也会输出二十多条 `text:`（"U" repeated 64 times
+  // 这类规律性填充），甚至把 IHDR 认成 Photoshop swatch。所以 `text:` 不能作为判据，
+  // 只认确凿的 `file:` —— 且排除它自己会误认的那几个容器类型。
+  const hit = out
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => /file:/i.test(l) && !/(PNG|JPEG|GIF|Photoshop|Zip archive)/i.test(l))
+  if (hit === undefined) {
+    if (/^none$/im.test(out)) return { found: false, class: 'clean', detail: 'no embedded data' }
+    // 只有 text/meta 行：证明不了有隐写，也证明不了没有——留 inconclusive。
+    return undefined
+  }
+  return { found: true, class: 'exposure', detail: hit.slice(0, 200) }
+}
+
+/**
+ * 文件雕刻 / 嵌入检测的判据。
+ *
+ * binwalk 的签名表每行以「十进制偏移 + 0x十六进制 + 描述」开头。**只有容器自身的
+ * 声明不算发现**：一张普通 PNG 也会被识别出 `PNG image`，那是文件头不是隐藏文件。
+ * 出现第二个签名、或者签名不是容器类型，才算嵌入。
+ */
+export function carveVerdict(ctx: VerdictContext): { found: boolean; detail?: string; class?: FindingClass } | undefined {
+  const rows = ctx.stdout
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => /^\d+\s+0x[0-9A-Fa-f]+\s+/.test(l))
+  if (rows.length === 0) return undefined
+  const containerOnly =
+    rows.length === 1 && /(PNG|JPEG|GIF|ELF|Zip) (image|archive|executable)/i.test(rows[0]!)
+  if (containerOnly) {
+    return { found: false, class: 'clean', detail: `only container signature: ${rows[0]!.slice(0, 100)}` }
+  }
+  return {
+    found: true,
+    class: 'exposure',
+    detail: rows.slice(0, 5).map((r) => r.slice(0, 80)).join(' | ').slice(0, 300),
+  }
+}
+
+/**
+ * ROP gadget 的判据。
+ *
+ * 这**不是漏洞发现**：几乎每个二进制都能找到 gadget，「有 pop rdi」不代表可利用。
+ * 它提供的是攻击构造的原材料清单，所以只能报 exposure，并且只有在找到
+ * 控制寄存器那一类时才值得记一笔——`ret` 满地都是，记它没有信息量。
+ */
+export function gadgetVerdict(ctx: VerdictContext): { found: boolean; detail?: string; class?: FindingClass } | undefined {
+  const out = ctx.stdout
+  if (out.trim() === '') return undefined
+  const useful = ['pop rdi', 'pop rsi', 'pop rdx', 'pop rax', 'syscall', 'leave ; ret']
+  const hits = useful.filter((g) => new RegExp(g.replace(/ /g, '\\s*;?\\s*'), 'i').test(out))
+  if (hits.length === 0) return { found: false, class: 'clean', detail: 'no register-control gadgets' }
+  return { found: true, class: 'exposure', detail: `gadgets: ${hits.join(', ')}` }
+}
+
+/**
+ * garak 的判据。
+ *
+ * 它按 probe 家族批量打目标 LLM，每条探针的结论落在输出里的 `PASS`/`FAIL` 标记上。
+ * 只有出现 FAIL 才算「这个探针打穿了」——那确实是可利用的问题（越狱、提示注入、
+ * 数据泄露），记 finding 而不是 exposure。
+ *
+ * 注意它和 web 扫描器的区别：这里没有「正常请求对照」可用，因为正常 prompt
+ * 本来就该被拒；判据只能是探针自己的 PASS/FAIL 语义。
+ */
+export function garakVerdict(ctx: VerdictContext): { found: boolean; detail?: string; class?: FindingClass } | undefined {
+  const out = `${ctx.stdout}\n${ctx.stderr}`
+  const fails = out.split('\n').map((l) => l.trim()).filter((l) => /\bFAIL\b/.test(l))
+  if (fails.length > 0) {
+    return { found: true, class: 'finding', detail: fails.slice(0, 3).join(' | ').slice(0, 260) }
+  }
+  if (/\bPASS\b/i.test(out) || /report written to/i.test(out)) {
+    return { found: false, class: 'clean', detail: 'no probe failures' }
+  }
+  return undefined
+}
+
+/**
+ * RSA 攻击的判据。
+ *
+ * RsaCtfTool 成功时输出 PEM 私钥或明文；失败时只是把试过的攻击列一遍。
+ * 判据只能是「有没有真的恢复出私钥/明文」——列出攻击名字不算发现，
+ * 那和 nuclei 把 info 级指纹报成漏洞是同一类错误。
+ */
+export function rsaVerdict(ctx: VerdictContext): { found: boolean; detail?: string; class?: FindingClass } | undefined {
+  const out = `${ctx.stdout}`
+  if (/BEGIN RSA PRIVATE KEY|BEGIN PRIVATE KEY/.test(out)) {
+    return { found: true, class: 'finding', detail: 'private key recovered' }
+  }
+  if (/\bFLAG\{|flag\{/.test(out)) {
+    const m = out.match(/(FLAG\{[^}]{1,200}\}|flag\{[^}]{1,200}\})/)
+    return { found: true, class: 'finding', detail: m?.[1] ?? 'plaintext recovered' }
+  }
+  if (/No attack success|failed|no key found/i.test(out)) {
+    return { found: false, class: 'clean', detail: 'all attacks exhausted' }
+  }
+  return undefined
+}
+
+/**
+ * 云存储桶的判据。
+ *
+ * 只认「确实存在且可列出/可写」——桶不存在、403 私有、DNS 无解析都不算发现。
+ * 原文工具会把「桶不存在」也打印出来（它随后会尝试劫持），所以不能见输出就报。
+ */
+export function bucketVerdict(ctx: VerdictContext): { found: boolean; detail?: string; class?: FindingClass } | undefined {
+  const out = `${ctx.stdout}`
+  if (out.trim() === '') return undefined
+  if (/(可以劫持|hijack|NoSuchBucket|不存在)/i.test(out)) {
+    return { found: true, class: 'exposure', detail: 'bucket name dangling — takeover candidate' }
+  }
+  if (/(公开读|public-read|ListBucket|object list|可写|writeable)/i.test(out)) {
+    return { found: true, class: 'finding', detail: 'bucket publicly accessible' }
+  }
+  if (/(私有|private|AccessDenied|403)/i.test(out)) {
+    return { found: false, class: 'clean', detail: 'bucket exists but private' }
+  }
+  return undefined
+}
+
 export function checksecVerdict(ctx: VerdictContext): { found: boolean; detail?: string; class?: FindingClass } | undefined {
   const doc = loadJson([], ctx.stdout) as Record<string, Record<string, unknown>> | undefined
   if (doc === undefined) return undefined
@@ -1116,21 +1258,36 @@ export const DEFAULT_AGENTS: readonly AgentCandidate[] = [
     id: 'garak',
     direction: 'ai-security',
     kind: 'cli',
-    command: ['garak'],
-    capability: 'LLM 漏洞扫描：探针覆盖越狱、数据泄露、提示注入、编码攻击',
+    // 装在独立 venv 里：系统 Python 3.14 装不动它的依赖链（torch/transformers 实测吃掉 5.9G）。
+    // probe 查 command[0]，venv 的 python 在就等于 garak 在。
+    command: ['/root/proj/agents/venvs/aisec/bin/python', '-m', 'garak'],
+    capability: 'LLM 漏洞扫描：探针覆盖越狱、数据泄露、提示注入、编码攻击，按家族批量打目标端点',
     priority: 20,
-    accepts: ['url', 'host'],
+    accepts: ['url', 'host', 'unknown'],
     cost: 'expensive',
     defaultTimeoutMs: 1_800_000,
-    invocation: (target) => ['--model_type', 'rest', '--model_name', target, '--report_prefix', 'garak'],
-    requires: 'pip install garak（约 400MB 依赖）',
-    requiresEnv: [['OPENAI_API_KEY', 'LLM_API_KEY']],
+    invocation: (target) => [
+      '--model_type', 'rest',
+      '--model_name', target,
+      '--probes', 'promptinject,dan,leakreplay,encoding',
+      '--report_prefix', 'garak',
+    ],
+    verdict: garakVerdict,
+    // ⚠️ 不设 requiresEnv：这一层扫的是**靶场目标端点**，用的是目标自己的凭据，
+    // 不是本机的 OPENAI_API_KEY。原来那条要求会让 garak 在没配 key 的比赛机器上
+    // 被直接判成不可用，而它本来完全跑得动。
+    requires:
+      '目标须是 OpenAI 兼容的 /chat/completions 端点；首次运行会拉取探针数据集；' +
+      '单轮可达十几分钟，别用默认超时卡它',
   },
   {
     id: 'pyrit',
     direction: 'ai-security',
-    kind: 'subagent',
-    provider: 'pyrit',
+    // ⚠️ 原来是 kind:'subagent' + provider:'pyrit'，但 DSH 侧没有 pyrit 这个 provider，
+    // 那个形态永远不会就绪。PyRIT 的真实形态是「客户端 + 后端服务」，所以改成 CLI，
+    // 由调用方先 `pyrit_scan start-server` 再打。
+    kind: 'cli',
+    command: ['/root/proj/agents/venvs/aisec/bin/pyrit_scan'],
     capability: '多轮红队编排：编排器-转换器-评分器三段式，可编程攻击流程',
     priority: 30,
     requires: '本执行层尚未接入 subagent provider（只驱动 cli/mcp）',
@@ -1153,8 +1310,10 @@ export const DEFAULT_AGENTS: readonly AgentCandidate[] = [
     id: 'mcp-scan',
     direction: 'mcp-security',
     kind: 'cli',
-    command: ['mcp-scan'],
-    capability: 'MCP 配置与工具描述扫描：提示注入、工具投毒、跨 server 影子攻击',
+    // 上游已改名 snyk-agent-scan（旧名只留一条改名警告就直接退出）。
+    // 装在独立 venv：pypi 版依赖 RapidFuzz 等被 debian 占用的包，系统 pip 装不动。
+    command: ['/root/proj/agents/venvs/aisec/bin/snyk-agent-scan'],
+    capability: 'MCP 配置与工具描述扫描：提示注入、工具投毒、跨 server 影子攻击（Snyk Agent Scan）',
     priority: 20,
     // 吃的是配置文件路径，不是 MCP 的启动命令——这两个形态经常被混为一谈。
     accepts: ['file'],
@@ -1369,6 +1528,25 @@ export const DEFAULT_AGENTS: readonly AgentCandidate[] = [
     },
     verdict: sslyzeVerdict,
   },
+  {
+    id: 'rsacrack',
+    direction: 'crypto',
+    kind: 'cli',
+    // 75 种攻击：wiener / boneh_durfee / fermat / hastads / common_modulus / lattice / z3_solver 等。
+    // 装在 aisec venv 里（editable 安装自源码），入口有两个别名。
+    command: ['/root/proj/agents/venvs/aisec/bin/RsaCtfTool'],
+    capability: 'RSA 全攻击面：小 e、共模、Håstad 广播、Wiener 连分数、Boneh-Durfee、Fermat 分解、格攻击',
+    priority: 10,
+    accepts: ['file'],
+    cost: 'moderate',
+    defaultTimeoutMs: 300_000,
+    // ⚠️ 不要加 `--attack all`：那条路会走 factordb 联网查询，外网受限时长时间重试到超时。
+    // 实测默认攻击集对 128 位 n 秒级恢复出私钥（rc=0，两个 PEM 块），已经够用。
+    invocation: (target) => ['--publickey', target, '--private', '--timeout', '120'],
+    verdict: rsaVerdict,
+    requires:
+      '吃的是公钥文件（PEM/DER）；纯 n/e/c 数值要用 --n/--e 传参，别用 --e（和 --ext 有歧义）',
+  },
   // ── 内网 / AD ──
   {
     id: 'enum4linux-ng',
@@ -1404,6 +1582,26 @@ export const DEFAULT_AGENTS: readonly AgentCandidate[] = [
     verdict: nucleiVerdict,
   },
   {
+    id: 'cloud-bucket',
+    direction: 'web-pentest',
+    kind: 'cli',
+    // 四家云的对象存储桶检测：阿里云 / 腾讯云 / 华为云 / AWS，含桶不存在时的劫持判定。
+    // 装在 aisec venv 里（requirements.txt 锁了 cffi==1.15.1 在 3.13 上装不了，
+    // 依赖是逐个补的）。
+    command: ['/root/proj/agents/venvs/aisec/bin/python',
+              '/root/proj/agents/Cloud-Bucket-Leak-Detection-Tools-main/main.py'],
+    capability: '云存储桶暴露面：四家云的对象存储公开读/可写/桶名悬空（可劫持）判定',
+    priority: 25,
+    accepts: ['url', 'host'],
+    cost: 'cheap',
+    defaultTimeoutMs: 120_000,
+    invocation: (target) => ['-aliyun', target],
+    verdict: bucketVerdict,
+    requires:
+      '只做了阿里云入口；腾讯/华为/AWS 分别是 -tcloud / -hcloud / -aws。' +
+      'config/conf.py 里的 AK 仅批量模式需要，单桶探测不需要',
+  },
+  {
     id: 'strix',
     direction: 'web-pentest',
     kind: 'cli',
@@ -1426,5 +1624,95 @@ export const DEFAULT_AGENTS: readonly AgentCandidate[] = [
       '需要 docker 与沙箱镜像（默认从 ghcr.nju.edu.cn 取，直连 ghcr.io 拉不动）；' +
       '目标若是 127.0.0.1 需容器能回连宿主，否则容器内不可达',
     requiresEnv: [['LLM_API_KEY', 'OPENAI_API_KEY']],
+  },
+
+  // ── Pwn：从「看懂」走到「打穿」 ──
+  //
+  // 这个方向和 binary-reverse 的分工是刻意的：逆向关心「这是什么、怎么运行」，
+  // 利用关心「控制流能不能被夺走」。原来 registry 里只有 checksec/radare2 这类
+  // 静态分析，缺的正是最后一段——构造利用需要 gadget 清单和一次性 getshell 偏移。
+  {
+    id: 'ropgadget',
+    direction: 'pwn',
+    kind: 'cli',
+    command: ['ROPgadget'],
+    capability: 'ROP gadget 清单：控制寄存器、syscall、栈迁移片段，构造 ROP 链的原材料',
+    priority: 10,
+    accepts: ['binary', 'file'],
+    cost: 'cheap',
+    defaultTimeoutMs: 120_000,
+    invocation: (target) => ['--binary', target],
+    verdict: gadgetVerdict,
+    // 不设 control：任何二进制都有 gadget，没有"clean"形态可供校准。
+    // gadgetVerdict 因此只把它记成 exposure，绝不报 finding。
+  },
+  {
+    id: 'one-gadget',
+    direction: 'pwn',
+    kind: 'cli',
+    command: ['one_gadget'],
+    capability: 'libc 里满足约束的一次性 execve("/bin/sh") 偏移，省掉整条 ROP 链',
+    priority: 15,
+    accepts: ['binary', 'file'],
+    cost: 'moderate',
+    defaultTimeoutMs: 120_000,
+    invocation: (target) => ['-l', '2', target],
+    verdict: gadgetVerdict,
+  },
+
+  // ── Misc：隐写与文件雕刻 ──
+  //
+  // 这一类没有共同方法论，共同点只是「都不需要靶机实例」。
+  // 两条判据都刻意收紧到只认确凿证据：宁可 inconclusive，不猜 found。
+  {
+    id: 'binwalk',
+    direction: 'misc',
+    kind: 'cli',
+    command: ['binwalk'],
+    capability: '文件签名雕刻：找出容器里的嵌入文件、压缩流、固件段',
+    priority: 10,
+    accepts: ['file', 'binary'],
+    cost: 'cheap',
+    defaultTimeoutMs: 180_000,
+    invocation: (target) => [target],
+    verdict: carveVerdict,
+    control: {
+      argv: ['binwalk', '$TARGET'],
+      target: '/root/异构agent/dsh-secops/tools/control-clean.png',
+      expect: 'clean',
+      note:
+        '一张 64x64 纯渐变 PNG 只有自身签名（PNG image）。若它报出第二个签名，' +
+        '说明签名库或参数把容器头误当嵌入内容，此时任何"发现"都不可信。',
+    },
+  },
+  {
+    id: 'zsteg',
+    direction: 'misc',
+    kind: 'cli',
+    command: ['zsteg'],
+    capability: 'PNG/BMP 位平面扫描：逐通道逐位提取嵌入的文本或完整文件',
+    priority: 12,
+    accepts: ['file'],
+    cost: 'cheap',
+    defaultTimeoutMs: 90_000,
+    invocation: (target) => ['-a', target],
+    verdict: stegoVerdict,
+    // ⚠️ 不设 control：实测它连一张干净渐变图都会吐出二十多条 text: 行
+    //（"U" repeated 64 times 这类规律填充），并不存在"输出干净"的样本可比。
+    // 判据因此只认 file: 且排除它自己会误认的容器类型，其余一律 inconclusive。
+  },
+  {
+    id: 'steghide',
+    direction: 'misc',
+    kind: 'cli',
+    command: ['steghide'],
+    capability: 'JPEG/BMP/WAV 隐写探测与提取（空口令 + 常见口令清单）',
+    priority: 20,
+    accepts: ['file'],
+    cost: 'cheap',
+    defaultTimeoutMs: 60_000,
+    invocation: (target) => ['info', '-sf', target, '-p', ''],
+    verdict: stegoVerdict,
+    requires: 'JPEG/BMP/WAV 才适用（PNG 不支持），遇到 PNG 会自动 inconclusive',
   },
 ]

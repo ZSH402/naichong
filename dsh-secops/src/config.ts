@@ -8,6 +8,17 @@
 export interface SecopsConfig {
   /** 授权目标主机名，精确匹配（大小写不敏感）。为空则范围闸不生效。 */
   allowedHosts?: string[]
+  /**
+   * 范围闸模式。默认 `enforce`：**未配置 allowedHosts 等同拒绝一切网络动作**。
+   *
+   * 为什么默认不是放行：安全控制器的默认值必须是"关"，不是"开"。
+   * 旧实现里 `allowedHosts: []` 会让 `installScopeGuard` 直接 return，
+   * 日志打一句 "scope guard is inert" 就算完事——等于忘配就等于不设防，
+   * 而忘配是最常见的情况。这与 Rego 侧的 `default allow := false` 也自相矛盾。
+   *
+   * 要把闸整个关掉，必须显式写 `scopeMode: "open"`，并且启动时会打出警告。
+   */
+  scopeMode?: 'enforce' | 'open'
   /** 工具调用总次数上限。达到后 guard 拒绝后续调用。 */
   maxToolCalls?: number
   /** 墙钟预算（毫秒），从插件加载起算。 */
@@ -169,6 +180,8 @@ export interface SecopsConfig {
 
 export interface ResolvedConfig {
   allowedHosts: readonly string[]
+  /** 见 SecopsConfig.scopeMode。默认 enforce。 */
+  scopeMode: 'enforce' | 'open'
   maxToolCalls: number | undefined
   maxWallClockMs: number | undefined
   maxSteps: number | undefined
@@ -265,6 +278,12 @@ export function resolveConfig(config: SecopsConfig | undefined): ResolvedConfig 
     return host.trim().toLowerCase()
   })
 
+  const rawMode = input.scopeMode
+  if (rawMode !== undefined && rawMode !== 'enforce' && rawMode !== 'open') {
+    throw new TypeError('secops: config field "scopeMode" must be "enforce" or "open"')
+  }
+  const scopeMode: 'enforce' | 'open' = rawMode ?? 'enforce'
+
   const logDecisions = input.logDecisions
   if (logDecisions !== undefined && typeof logDecisions !== 'boolean') {
     throw new TypeError('secops: config field "logDecisions" must be a boolean')
@@ -275,6 +294,7 @@ export function resolveConfig(config: SecopsConfig | undefined): ResolvedConfig 
 
   return {
     allowedHosts: Object.freeze([...new Set(allowedHosts)]),
+    scopeMode,
     maxToolCalls: assertPositiveInt(input.maxToolCalls, 'maxToolCalls'),
     maxWallClockMs: assertPositiveInt(input.maxWallClockMs, 'maxWallClockMs'),
     maxSteps: assertPositiveInt(input.maxSteps, 'maxSteps'),

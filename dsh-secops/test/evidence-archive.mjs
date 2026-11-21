@@ -121,8 +121,11 @@ check('unknown claim rejected', bad.value?.status === 'rejected', bad.value)
   })
   await runner.drain()
   check('artifact match accepted as evidence', store.get(claim3.id)?.evidence.length === 1, store.get(claim3.id)?.evidence)
-  check('recorded as weak (artifact only)', store.get(claim3.id)?.evidence[0]?.relevance?.strength === 'weak', store.get(claim3.id)?.evidence[0])
-  check('weak does not promote status', store.get(claim3.id)?.status === 'hypothesis', store.get(claim3.id)?.status)
+  // 队列任务证据带真实 source.argv（系统记录），按新语义应为 strong 而非 weak。
+  // 语义变更说明：artifact 单独看无法自证，但"系统读取的文件"可以——这正是
+  // 漏洞赏金平台接受截图/视频的理由（内容可核查，不要求可重放）。
+  check('recorded as strong (artifact from system-read file)', store.get(claim3.id)?.evidence[0]?.relevance?.strength === 'strong', store.get(claim3.id)?.evidence[0])
+  check('single evidence yields partial', store.get(claim3.id)?.status === 'partial', store.get(claim3.id)?.status)
 }
 
 runner.close()
