@@ -23,6 +23,14 @@ import { EgressProxy } from './egress.ts'
 import { ModelFallback } from './model-fallback.ts'
 import { classifyRisk, defaultHardFloor, needsApproval, type HitlPolicy } from './hitl.ts'
 import { ClaimStore, installProvenanceTools } from './provenance-tools.ts'
+import { refuteTools } from './refute-tools.ts'
+import { oracleTools } from './oracle-tools.ts'
+import { patchTools } from './patch-tools.ts'
+import { graphTools } from './graph-tools.ts'
+import { searchTools } from './search-tools.ts'
+import { fuzzTools } from './fuzz-tools.ts'
+import { semgrepTools } from './semgrep-tools.ts'
+import { blackboxTools } from './blackbox-tools.ts'
 import { registerProvenanceProjection } from './provenance.ts'
 import { QueueRunner } from './queue-runner.ts'
 import { createEvidenceArchiver, installQueueTools } from './queue-tools.ts'
@@ -36,6 +44,8 @@ import { installAnswerTools } from './answer-tools.ts'
 import { installDataProfileTools } from './data-profile.ts'
 import { CoverageLedger, installCoverageTools } from './coverage.ts'
 import { AssetStore, assetTools } from './asset-store.ts'
+import { CveStore } from './cve-store.ts'
+import { cveTools } from './cve-tools.ts'
 import { checkWiring, reportWiring } from './wiring-check.ts'
 import { ArtexClient, createArtexAdapter } from './council/artex-adapter.ts'
 import { createMcpAdapter, closeAllMcpClients } from './council/mcp-adapter.ts'
@@ -235,6 +245,22 @@ export async function apply(ctx: Context, config?: SecopsConfig): Promise<void> 
       }
     }
     installProvenanceTools(ctx, store)
+    // 白盒反驳：用确定性代码事实去杀幻觉，只杀「仓库里根本没有这个东西」这一类。
+    for (const tool of refuteTools(store)) ctx.tools.register(tool)
+    // 实证预言机：由系统在沙箱里跑，命中/未中/跑不成三态分开。
+    for (const tool of oracleTools(store)) ctx.tools.register(tool)
+    // 补丁变体：把一次修复变成在同类代码里找漏项。
+    for (const tool of patchTools()) ctx.tools.register(tool)
+    // 调用图与切片：结构问题不能靠字符串搜索回答。
+    for (const tool of graphTools()) ctx.tools.register(tool)
+    // 假设排序：把"下一步测什么"从直觉换成可解释的 UCB1。
+    for (const tool of searchTools(store)) ctx.tools.register(tool)
+    // 混合执行：插桩编译 / 覆盖率引导 fuzz / 约束求解。
+    for (const tool of fuzzTools()) ctx.tools.register(tool)
+    // 规则执行：补丁变体生成的规则必须真的跑一遍才算证据。
+    for (const tool of semgrepTools()) ctx.tools.register(tool)
+    // 纯黑盒探测：确定性原语（测绘/差分/异常/竞态/状态机）+ 护栏。
+    for (const tool of blackboxTools()) ctx.tools.register(tool)
     // 答案必须有 confirmed 的 claim 撑着，否则只能按推测报告。
     installAnswerTools(ctx, store)
     ctx.logger.info(
@@ -353,6 +379,11 @@ export async function apply(ctx: Context, config?: SecopsConfig): Promise<void> 
     // 资产库：把每次扫描的结果落成可查询的结构，而不是散在证据文件里。
     const assets = new AssetStore(`${baseDirForState}/.dsh-secops/assets.jsonl`)
     for (const tool of assetTools(assets)) ctx.tools.register(tool)
+    // CVE 索引：把「指纹 + 版本」变成可检索的候选列表。离线，作业前建一次。
+    const cveIndexPath = `${baseDirForState}/.dsh-secops/cve-index.jsonl`
+    const cves = new CveStore({ path: cveIndexPath }).load()
+    for (const tool of cveTools(cves, { indexPath: cveIndexPath })) ctx.tools.register(tool)
+    ctx.logger.info(`secops: cve index armed (${String(cves.stats().total)} record(s) recovered)`)
     // 启动时先把接线问题喊出来，别等第一次派活才发现。
     reportWiring(checkWiring(DEFAULT_AGENTS), {
       info: (m) => ctx.logger.info(m),

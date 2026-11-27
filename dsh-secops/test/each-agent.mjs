@@ -131,10 +131,10 @@ judge('rea', await hit('rea', 'binary-reverse', '/usr/bin/ls', 240_000), { toler
 judge('radare2', await hit('radare2', 'binary-reverse', '/usr/bin/ls', 240_000))
 // corvus：mcp-security 方向唯一的可用牌。target 是 MCP server 的**启动命令**
 // （corvus 会自己拉起来再测），不是 URL。全量 34 模块约 5.5 分钟。
+const CS = '/root/proj/agents/cyberstrike/CyberStrikeAI-main'
 judge('corvus', await hit('corvus', 'mcp-security', `${CS}/cyberstrike-mcp -config ${CS}/config.example.yaml`, 600_000))
 
 // ── MCP（CyberStrikeAI）──
-const CS = '/root/proj/agents/cyberstrike/CyberStrikeAI-main'
 const csBin = path.join(CS, 'cyberstrike-mcp')
 if (fs.existsSync(csBin)) {
   const mcp = createMcpAdapter({

@@ -274,8 +274,12 @@ export class ClaimStore {
         relevance: { strength, matched },
         addedAt: Date.now(),
       },
-      // 用 verified 模式（按 relevance 推进），但 deriveStatus 里加了一道硬门槛：
-      // **confirmed 必须至少有一条 replay.verified**。见 provenance.ts 的说明。
+      // 用 verified 模式：证据是 strong（系统记录的 argv，或系统读取的文件产物）时，
+      // 两条独立路径即可 confirmed。**这一级不要求重放** —— 文件证据属于 attested
+      // （内容可核查、未重放），这是刻意的：真实目标通常没法让你重放一遍。
+      // 要「可重放」那一级就走 mode: 'replay'，那里才要求 replay.verified === true。
+      // 早先这里的注释写成「confirmed 必须至少有一条 replay.verified」，与实现不符，
+      // 已按实测行为改正（两条文件证据确实能到 confirmed）。
       { mode: 'verified' },
     )
     if (next === prev) return { ok: true, claim: prev, rejected: 'duplicate' }

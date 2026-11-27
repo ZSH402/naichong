@@ -15,3 +15,8 @@ engine/runner/target/
 # Node
 node_modules/
 *.log
+
+# 黑盒线的语料（公开 RFC，用 fetch.sh 拉取）
+engine/blackbox/corpus/rfc*.txt
+__pycache__/
+*.pyc
