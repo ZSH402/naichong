@@ -205,9 +205,28 @@ function distinctPaths(evidence: readonly Evidence[]): number {
  *   - 有证据但不足阈值 → partial
  *   - 无证据 → hypothesis
  */
+export interface DeriveOptions {
+  readonly refuted?: boolean
+  readonly inference?: boolean
+  readonly mode?: 'paths' | 'verified' | 'replay'
+  /**
+   * 升级 confirmed 时是否要求存在**对照证据**。
+   *
+   * 为什么需要这个开关：`verified` 模式原本只要求"两条不同 pathKey 的强证据"，
+   * 完全不看有没有 baseline（目标正常情况）或 control（检测器校准）。
+   * 结果是同一类漏洞用两个自命名 pathKey 挂两条系统读取的文件，
+   * 在没有任何对照的情况下就被标成 confirmed——而这正是"报了个看起来对的"
+   * 和"确认了真的存在"之间的差别。
+   *
+   * 默认关闭是为了不破坏既有调用方（有些场景确实拿不到对照）；
+   * 编排层在需要严格口径时显式打开。
+   */
+  readonly requireCounterpart?: boolean
+}
+
 export function deriveStatus(
   evidence: readonly Evidence[],
-  options: { refuted?: boolean; inference?: boolean; mode?: 'paths' | 'verified' | 'replay' } = {},
+  options: DeriveOptions = {},
 ): ClaimStatus {
   if (options.refuted === true) return 'refuted'
   // 硬反驳优先：必须是 strong（系统读取的文件/记录），不接受模型自述。
@@ -240,7 +259,18 @@ export function deriveStatus(
       : options.mode === 'verified'
         ? new Set(proofOnly.filter((e) => e.relevance?.strength === 'strong').map((e) => e.pathKey)).size
         : distinctPaths(proofOnly)
-  if (count >= CONFIRM_THRESHOLD) return 'confirmed'
+  if (count >= CONFIRM_THRESHOLD) {
+    if (options.requireCounterpart === true) {
+      // baseline（目标正常样本）与 control（检测器校准样本）都算对照。
+      // 一类是"这个响应正常长什么样"，一类是"这把尺子准不准"，
+      // 对升级确认来说二者居其一即可，但**不能都没有**。
+      const hasCounterpart = evidence.some(
+        (e) => (e.role === 'baseline' || e.role === 'control') && e.relevance?.strength === 'strong',
+      )
+      if (!hasCounterpart) return 'partial'
+    }
+    return 'confirmed'
+  }
   if (count >= 1) return 'partial'
   return 'hypothesis'
 }
@@ -264,7 +294,7 @@ export function newClaim(claim: string, options: { falsifier?: string; inference
 export function withEvidence(
   claim: Claim,
   evidence: Evidence,
-  options: { mode?: 'paths' | 'verified' } = {},
+  options: { mode?: 'paths' | 'verified'; requireCounterpart?: boolean } = {},
 ): Claim {
   // 去重要带上 role：同一份产物既是「正常请求」又是「越权证明」是不可能的，
   // 同一个 ref 用不同角色登记必须是两条记录。否则补 baseline 时会被判重复而静默丢弃，
@@ -283,7 +313,13 @@ export function withEvidence(
     ...claim,
     evidence: next,
     independentPaths: distinctPaths(next),
-    status: deriveStatus(next, { refuted, ...(options.mode === undefined ? {} : { mode: options.mode }) }),
+    status: deriveStatus(next, {
+      refuted,
+      ...(options.mode === undefined ? {} : { mode: options.mode }),
+      ...(options.requireCounterpart === undefined
+        ? {}
+        : { requireCounterpart: options.requireCounterpart }),
+    }),
     updatedAt: evidence.addedAt,
   }
 }

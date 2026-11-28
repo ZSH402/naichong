@@ -84,12 +84,11 @@ def _load_scope(path: str) -> dict:
     except Exception as exc:
         print(f"[orch] 警告：范围文件读取失败（{exc}），本轮不注入边界；Rego 闸仍默认拒绝", flush=True)
         return {}
-BASE = os.path.dirname(os.path.abspath(__file__))
-STATE_DIR = os.path.join(BASE, "state")
-OVERLAY = os.path.join(BASE, "overlay.yml")
+STATE_DIR = "/root/tpctf/orchestrator"
+OVERLAY = "/root/tpctf/overlay.yml"
 # overlay 是可选增强：文件不在就不传，而不是让 DSH 启动失败
 PATCH = f"--patch {OVERLAY} " if os.path.exists(OVERLAY) else ""
-AGENT_DIR = os.path.join(BASE, "agents")
+AGENT_DIR = "/root/tpctf/agents"
 # 领域分类 → 领域规格文件。领域规格是「角色 + 假设模板 + 失败模式 + 验证纪律」，
 # 这是专业化真正落地的地方：不是给同一份 prompt 换工具，而是换一整套先验。
 DOMAINS = {
@@ -146,10 +145,29 @@ def load_state(path: str) -> StateView | None:
 
 
 def save_state(path: str, st: StateView) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    payload = st.to_json_dict() if isinstance(st, StateView) else st
-    with open(path, "w", encoding="utf-8") as fh:
+    """原子写：写临时文件 → fsync → 改名。
+
+    早先是 `open(path, "w")` 直接覆写。SIGTERM / 磁盘满 / 断电落在写的中途，
+    状态文件就是半截 JSON；下次 load_state 按 fail-loud 抛 JSONDecodeError，
+    整题的历史假设与排除路径一起作废。
+
+    `os.replace` 在同一文件系统内是原子的：读到的要么是旧内容、要么是新内容，
+    不存在中间态。先 fsync 再改名，否则断电后可能出现"文件名换了、内容还在
+    页缓存里"的空文件。
+
+    另外剥掉 api_key：它是运行时凭据，不该跟着状态文件落盘。
+    """
+    payload = st.model_dump() if hasattr(st, "model_dump") else dict(st)
+    payload["api_key"] = ""
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
 
 
 def salvage_from_log(log_path: str, max_chars: int = 3000) -> str:
@@ -168,19 +186,33 @@ def salvage_from_log(log_path: str, max_chars: int = 3000) -> str:
             raw = fh.read().decode("utf-8", "replace")
     except OSError:
         return ""
+    # 脱敏：日志里混着 ANSI 转义、WAF 拦截页的整页 HTML、几百行的栈帧。
+    # 原样回灌等于把噪音当上下文，模型会在堆栈里找规律。
+    raw = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", raw)              # ANSI
+    raw = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>", " ", raw, flags=re.I)
+    raw = re.sub(r"<[^>]{1,200}>", " ", raw)                       # HTML 标签
+    raw = re.sub(r"\b[0-9a-f]{16,}\b", "<hex>", raw)              # 长哈希
     lines = []
+    in_trace = 0
     for line in raw.splitlines():
-        t = line.strip()
+        t = re.sub(r"[ \t]{2,}", " ", line.strip())
         if t == "" or t == "dsh: reasoning:":
             continue
         if t.startswith("[" + "run.sh" + "]") or t.startswith("[llm-deepseek"):
             continue
-        lines.append(t)
+        # 栈帧只留首行信号，其余丢掉：几十行 File/at 对判断"在做什么"没帮助
+        if re.search(r"^\s*(File \"|at [\w.$]+\(|#\d+ 0x)", t):
+            in_trace += 1
+            if in_trace > 3:
+                continue
+        else:
+            in_trace = 0
+        lines.append(t[:300])
     tail = "\n".join(lines[-25:])
     return tail[-max_chars:]
 
 
-ATTACH_ROOT = os.path.join(BASE, "attachments")
+ATTACH_ROOT = "/root/tpctf/attachments"
 # 交付物候选文件名。
 #
 # 原来是 ANSWER.txt / FLAG.txt —— 那是 CTF 的语义（一题一答案）。
@@ -196,30 +228,37 @@ DELIVERABLE_FILES = (
 PLACEHOLDER_RE = re.compile(r"^(todo|tbd|unknown|待定|无|none|n/?a|-+|\?+|\.\.\.)$", re.I)
 
 
-def detect_completion(challenge: str, current_ws: str) -> tuple[bool, str, str]:
-    """扫本轮和历史轮次的 workspace，看有没有产出合格的交付物。
+def detect_completion(challenge: str, current_ws: str,
+                      hypotheses: list[dict] | None = None) -> tuple[bool, str, str]:
+    """扫 workspace，看有没有产出**够格**的交付物。
 
-    存在理由（基线 v1 实测）：四道简单题耗时分别是 499/502/512/510 秒，
-    **全部卡在 8 分钟 deadline 的 92% 附近**——说明它们不是判断做完而停，
-    是被 deadline 掐停的。写完之后继续验证到时间耗尽，这是 3 倍量级的浪费。
+    存在理由（基线 v1 实测）：四道简单题耗时 499/502/512/510 秒，全部卡在
+    deadline 的 92% 附近——说明它们不是判断做完而停，是被掐停的。
 
-    判据刻意保守：文件存在、内容非空、不是占位符。宁可漏判（继续跑到 deadline）
-    也不要误判（东西还没写完就停）。
+    ## 早先版本的两个致命误判
 
-    注：曾有一层 `_rejected_flags()` 过滤——把平台判错的 flag 排除出「已完成」，
-    防止一个错答案把整题提前钉死。那套是比赛平台的语义，真实渗透没有「平台判定
-    答案对错」这回事，已随 CTF 模块一并移除。
+    1. **扫了材料目录**。`attachments/<target>/` 是放目标源码和附件的地方，
+       如果审计的开源项目自带 REPORT.md / FINDING.md，第 1 轮刚跑完就判定
+       已完成并退出。现在只扫本轮的 orch-* 工作区。
+
+    2. **零校验**。只要文件存在、长度 >= 4、首行不是占位符就结题，
+       模型把"疑似存在越权"写进 FINDING.md 也会被放行。
+       现在要求**至少一条 confirmed 假设**——没有实证的猜测不算完成。
+
+    这两条都是"响亮地错"的反面：系统安静地提前退出，人以为它做完了。
     """
+    # 硬门禁一：必须有实证。没有 confirmed 的假设，写再多文件也不算完成。
+    if hypotheses is not None:
+        if not any(h.get("status") == "confirmed" for h in hypotheses):
+            return False, "", ""
+
     roots = [current_ws]
     try:
         for name in os.listdir(WORK_ROOT):
             if name.startswith(f"orch-{challenge}-"):
                 roots.append(os.path.join(WORK_ROOT, name))
-        # ⚠️ 也必须扫材料目录：实跑发现 agent 会把产出写在这里（工作时 cwd 就是它），
-        # 而只扫 orch-* 会导致"明明写完了却一直跑到 deadline"。这是基线 v2 抓到的 bug。
-        att = os.path.join(ATTACH_ROOT, challenge)
-        if os.path.isdir(att):
-            roots.append(att)
+        # 注意：**不再扫 ATTACH_ROOT**。那里是目标材料目录，
+        # 里面的 REPORT.md 属于被审计的项目，不是本轮的产出。
     except OSError:
         pass
     for ws in roots:
@@ -382,7 +421,7 @@ def material_index(challenge: str, limit: int = 40) -> str:
     head/tail 取片段而不是整文件入上下文。context rot 是结构性的（O(n^2) attention），
     窗口再大也逃不掉，唯一解是不让内容进来。
     """
-    root = os.path.join(ATTACH_ROOT, challenge)
+    root = f"/root/tpctf/attachments/{challenge}"
     if not os.path.isdir(root):
         return ""
     rows: list[str] = []
@@ -513,19 +552,44 @@ def build_prompt(st: dict) -> str:
         # 领域规格放在最前面：它是角色，不是参考材料。
         lines += ["---", spec, "---", ""]
 
-    if confirmed:
-        lines += ["**已确认的结论**（不要重复验证）"]
-        lines += [f"- {h['statement']}" for h in confirmed]
-        lines.append("")
-    if refuted:
-        lines += ["**已排除的方向**（不要再回去）"]
-        lines += [f"- {h['statement']}  ← 因：{h.get('evidence', '已被观测否定')}" for h in refuted]
-        lines.append("")
-    if open_h:
-        lines += ["**待验证的假设**"]
-        lines += [f"- [{h['id']}] {h['statement']}\n  证伪条件：{h['falsify_by']}" for h in open_h]
-        lines.append("")
+    # 定额注入：只带最近的若干条，并且每条都截断。
+    #
+    # 这里曾经是全量平铺。跑满 20-40 轮后，几十条假设（statement ≤ 300 字 +
+    # evidence ≤ 160 字）把 prompt 尾部挤出去——而「硬性要求」和「三道闸」
+    # 恰恰在尾部。模型不是不遵守规则，是它根本没读到。
+    # 结论按时间追加，越老的越不重要，所以从尾部取。
+    def _clip(t: object, n: int) -> str:
+        return re.sub(r"\s+", " ", str(t)).strip()[:n]
 
+    lines += ["**已确认的结论**（不要重复验证）"]
+    if len(confirmed) > 8:
+        lines.append(f"（共 {len(confirmed)} 条，只列最近 8 条；完整清单见 MEMORY.md）")
+    lines += [f"- {_clip(h['statement'], 160)}" for h in confirmed[-8:]]
+    if not confirmed:
+        lines.append("- （无）")
+    lines.append("")
+
+    lines += ["**已排除的方向**（不要再回头）"]
+    if len(refuted) > 12:
+        lines.append(f"（共 {len(refuted)} 条，只列最近 12 条）")
+    lines += [
+        f"- {_clip(h['statement'], 140)}  ← 因：{_clip(h.get('evidence', '已被观测否定'), 100)}"
+        for h in refuted[-12:]
+    ]
+    if not refuted:
+        lines.append("- （无）")
+    lines.append("")
+
+    lines += ["**待验证的假设**"]
+    if len(open_h) > 6:
+        lines.append(f"（共 {len(open_h)} 条，只列最近 6 条）")
+    lines += [
+        f"- [{h['id']}] {_clip(h['statement'], 180)}\n  证伪条件：{_clip(h['falsify_by'], 120)}"
+        for h in open_h[-6:]
+    ]
+    if not open_h:
+        lines.append("- （无）")
+    lines.append("")
     if idx:
         lines += [idx, ""]
     if st.get("last_summary"):
@@ -605,7 +669,7 @@ def build_prompt(st: dict) -> str:
         "- 每条假设必须有 `falsify_by`，且要具体到「一次实验就能否定」；写「待定」等于没提",
         "- 字段缺失或类型不对会被判为格式错误，下一轮会点名要求你修正",
         "",
-        "工作目录就是本轮的 workspace；目标材料（源码、配置、资产清单等）在 `attachments/<target>/`。",
+        "工作目录就是本轮的 workspace；目标材料（源码、配置、资产清单等）在 `/root/tpctf/attachments/<target>/`。",
         "本轮结论请写进 workspace 下的 `FINDING.md`（或 `REPORT.md` / `EVIDENCE.md`），"
         "写了就会被视为本轮交付完成；纯过程记录写 `ROUND.md`。",
         "",
@@ -631,13 +695,47 @@ def extract_json_block(text: str) -> dict | None:
     （`判定=refuted（…）。` 的括号让整串比对落空，裁决闭环一声不响地停摆）。
     结构化之后，格式错误可以被**检测到并报出来**，而不是变成"本轮无进展"。
     """
-    for m in re.finditer(r"```json\s*\n(.*?)```", text, re.S):
-        try:
-            obj = json.loads(m.group(1))
-        except json.JSONDecodeError:
+    # 先用宽松的标签匹配（大小写不敏感），再对内容做括号栈扫描。
+    #
+    # 早先是 `r"```json\s*\n(.*?)```"` 非贪婪匹配，两个坑：
+    #   1. 模型在 observation 里贴了 Markdown 代码块 —— 内层 ``` 让匹配提前截断
+    #   2. 写成 ```JSON 大写标签 —— 直接不匹配
+    # 两者都会降级到 legacy 正则，而 legacy 丢 excluded，等于本轮排除全丢。
+    #
+    # 现在的做法：找到标签后**不靠结束标签**，而是从第一个 { 起做括号栈扫描，
+    # 扫描到深度归零为止。内嵌的 ``` 和字符串里的花括号都不会干扰。
+    for m in re.finditer(r"```[ \t]*(?i:json)[^\n]*\n", text):
+        start = text.find("{", m.end())
+        if start < 0:
             continue
-        if isinstance(obj, dict):
-            return obj
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if esc:
+                esc = False
+                continue
+            if ch == "\\":
+                esc = True
+                continue
+            if ch == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        obj = json.loads(text[start:i + 1])
+                    except json.JSONDecodeError:
+                        break
+                    if isinstance(obj, dict):
+                        return obj
+                    break
     return None
 
 
@@ -700,7 +798,10 @@ def parse_round(ws: str) -> tuple[str, list[dict], bool, list[dict], list[dict]]
     if obj is None:
         _ROUND_PROBLEMS.append(["没有 ```json 代码块，已降级到 Markdown 正则解析"])
         hyps, progress, verdicts = parse_round_legacy(text)
-        return (text[:600], hyps, progress, verdicts)
+        # 必须是 5 元组：调用侧 `summary, new_hyps, progress, verdicts, excluded_new = ...`
+        # 解包 5 个。这里早先返回 4 个，模型没写 ```json 围栏时直接
+        # ValueError: not enough values to unpack，整个编排器崩掉且状态不落盘。
+        return (text[:600], hyps, progress, verdicts, [])
 
     try:
         rr = RoundResult.model_validate(obj)
@@ -742,9 +843,63 @@ def last_round_problems() -> list[str]:
     return _ROUND_PROBLEMS[-1] if _ROUND_PROBLEMS else []
 
 
+def _install_scope_gate(st: dict) -> ScopeGate | None:
+    """按状态里的范围配置构造范围闸。
+
+    ## 为什么这一步之前缺失
+
+    `ScopeGate` 在文件头 import 了，但全文从未实例化或调用——范围边界一直
+    只停留在 prompt 文本里。模型"被告知"不要越界，而不是"不能"越界。
+    prompt 会因为上下文膨胀被挤掉，而闸不会。
+
+    ## 为什么没配范围时不直接拒绝
+
+    真按 fail-closed 做会让所有现有作业瞬间停摆（它们都没配范围）。
+    折中：没配时**大声记录**并且显式标到状态里，让"范围闸未生效"这件事
+    可见，而不是静默通过。配了就必须过。
+    """
+    sc = st.get("scope") or {}
+    if not (sc.get("cidrs") or sc.get("hosts")):
+        st["scope_gate"] = "inactive:no-scope-configured"
+        return None
+    try:
+        gate = ScopeGate(Scope(
+            cidrs=tuple(sc.get("cidrs") or ()),
+            hosts=tuple(sc.get("hosts") or ()),
+            tools=tuple(sc.get("tools") or ()),
+        ))
+        st["scope_gate"] = "active"
+        return gate
+    except Exception as exc:
+        # 构造失败按 fail-closed 处理：标成 broken，后面会拒绝派活
+        st["scope_gate"] = f"broken:{type(exc).__name__}"
+        return None
+
+
 def run_round(st: dict, state_path: str) -> None:
     st["round"] += 1
     ws = os.path.join(WORK_ROOT, f"orch-{st['challenge']}-r{st['round']}-{int(time.time())}")
+    gate = _install_scope_gate(st)
+    if gate is not None:
+        # action 必须是 connect / http_request / run_tool 三者之一，
+        # 写成 "target" 会被 Rego 的默认拒绝吞掉（所有目标一律 False）。
+        #
+        # 字段名也要对上：connect 分支读 `input.target`（用于 cidr_contains），
+        # http_request 分支读 `input.host`（精确匹配域名清单）。
+        # 只传 host 的话，纯 CIDR 范围下 connect 永远不命中。
+        target = st.get("target", "")
+        decision = gate.check("connect", target=target)
+        if not decision.allow:
+            decision = gate.check("http_request", host=target)
+        if not decision.allow:
+            st["last_summary"] = f"本轮未派活：范围闸拒绝（{decision.reason}）"
+            st["scope_denied"] = decision.reason
+            save_state(state_path, st)
+            return
+    elif str(st.get("scope_gate", "")).startswith("broken"):
+        st["last_summary"] = "本轮未派活：范围闸构造失败，按 fail-closed 拒绝"
+        save_state(state_path, st)
+        return
     prompt = build_prompt(st)
     env = dict(os.environ)
     env.update({"PROFILE": "headless", "WORKSPACE": ws, "DEEPSEEK_API_KEY": st.get("api_key", "")})
@@ -878,22 +1033,45 @@ def run_round(st: dict, state_path: str) -> None:
     # ⚠️ 必须先入库再回填裁决。
     # 早先这两段是反的：裁决遍历 st["hypotheses"] 时，本轮新提的假设还没进去，
     # 于是永远匹配不上，verdicts_total 一直是 0——Reflexion 闭环从没真正跑起来过。
-    # 新假设入库，带自增 id
+    # ── 假设入库：强制全局唯一 ID，模型自报的 id 只作为「本轮局部名」
+    #
+    # 早先是直接采信模型给的 id（注释说"裁决里引用的就是它，覆盖掉就对不上"）。
+    # 问题是模型会在 build_prompt 的示例里看到 `"id": "H1"`，第 3 轮再提一个
+    # 新假设也叫 H1——于是库里出现两个 H1，而下面的裁决回填是遍历全库，
+    # 会把第 1 轮已经 confirmed 的 H1 一起改成 refuted，历史结论被篡改，
+    # judged 还对各加 1 虚增 verdicts_total。
+    #
+    # 现在的做法：每轮建立 local_id -> global_id 映射，只在本轮内用局部名。
+    seq = int(st.get("next_hyp_seq") or 0)
+    if seq == 0:
+        # 兼容老状态文件：按现有条数起步，避免与已有 id 撞
+        seq = len(st["hypotheses"])
+    id_map: dict[str, str] = {}
     for h in new_hyps:
         if not h["statement"]:
             continue
-        # 保留 agent 自己写的 id：裁决里引用的就是它，覆盖掉就对不上了。
-        if not h.get("id"):
-            h["id"] = f"H{len(st['hypotheses']) + 1}"
+        local = (h.get("id") or "").strip()
+        seq += 1
+        gid = f"H{seq}"
+        if local:
+            id_map[local] = gid
+        h["id"] = gid
         h["status"] = "open"
         st["hypotheses"].append(Hypothesis(**h))
+    st["next_hyp_seq"] = seq
+
+    # ── 裁决回填：只允许更新 open 的假设，settled 的一律跳过
+    open_by_id = {h["id"]: h for h in st["hypotheses"] if h["status"] == "open"}
     judged = 0
     for v in verdicts:
-        for h in st["hypotheses"]:
-            if h["id"] == v["id"] and v["verdict"] in {"confirmed", "refuted"}:
-                h["status"] = v["verdict"]
-                h["evidence"] = v["observation"][:160]
-                judged += 1
+        target = id_map.get(str(v["id"]).strip(), str(v["id"]).strip())
+        h = open_by_id.get(target)
+        if h is None or v["verdict"] not in {"confirmed", "refuted"}:
+            continue
+        h["status"] = v["verdict"]
+        h["evidence"] = v["observation"][:160]
+        open_by_id.pop(target, None)   # 一条假设只被裁决一次
+        judged += 1
     st["verdicts_total"] = st.get("verdicts_total", 0) + judged
     problems = last_round_problems()
     if problems:
@@ -920,15 +1098,22 @@ def run_round(st: dict, state_path: str) -> None:
     if len(st.recent_summaries) > 6:
         st.recent_summaries = st.recent_summaries[-6:]
 
-    # 停滞检测：跨轮累积量判，不花模型调用
+    # ── 停滞检测与阶段切换：一次判定，禁止同轮反复覆写
+    #
+    # 早先是两段独立的 if：上面 stalled 就设 guess，下面 progress 又设回 converge。
+    # 十五行之内同一个字段被写两次，模型永远卡在 converge ↔ guess 的乒乓里，
+    # 而 phase_switches 只在前一次自增，统计也是歪的。
     signal = check_stall(st)
     st["stall_reasons"] = signal.reasons
+    _phase_before = st["phase"]
     if signal.stalled:
-        st["phase"] = "guess"
-        st["phase_switches"] = st.get("phase_switches", 0) + 1
+        if _phase_before != "guess":
+            st["phase"] = "guess"
+            st["phase_switches"] = st.get("phase_switches", 0) + 1
 
 
-    completed, where, answer = detect_completion(st["challenge"], ws)
+    completed, where, answer = detect_completion(
+        st["challenge"], ws, st.get("hypotheses"))
     if completed:
         st["completed"] = True
         st["completed_at_round"] = st["round"]
@@ -940,9 +1125,11 @@ def run_round(st: dict, state_path: str) -> None:
 
     if progress:
         st["last_progress_round"] = st["round"]
-        if st["phase"] == "guess":
-            # 猜测阶段拿到新证据 → 回到收敛，把新线索走扎实
+        # 已因停滞进入 guess 的这一轮不再抢回 converge——否则同轮乒乓。
+        # 让停滞判定赢：它看的是跨轮累积信号，比单轮的 progress 更抗噪。
+        if st["phase"] == "guess" and not signal.stalled and _phase_before == "guess":
             st["phase"] = "converge"
+            st["phase_switches"] += 1
     else:
         idle = st["round"] - st["last_progress_round"]
         if st["phase"] == "converge" and idle >= CONVERGE_PATIENCE:

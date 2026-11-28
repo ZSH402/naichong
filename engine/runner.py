@@ -112,7 +112,7 @@ def run(
     不是"尽量"。这也是故意的——软限额在真出事时等于没有。
     """
     if not available():
-        return _fallback(cmd, timeout=timeout, cwd=cwd, log=log)
+        return _fallback(cmd, timeout=timeout, cwd=cwd, log=log, env=env)
 
     args = [RUNNER, "--timeout", str(int(timeout)), "--grace", str(int(grace))]
     if idle:
@@ -148,34 +148,59 @@ def run(
     return RunResult(**{**data, "supervised": True, "log_path": log})
 
 
-def _fallback(cmd: list[str], *, timeout: int, cwd: str, log: str) -> RunResult:
+def _fallback(cmd: list[str], *, timeout: int, cwd: str, log: str,
+              env: dict[str, str] | None = None) -> RunResult:
     """没有 supervisor 时的降级路径。
 
     刻意做得朴素：这里不试图去修进程树问题——那正是 supervisor 存在的理由。
     降级只是让任务还能跑，并在结果里明确标记"保障缺失"。
+
+    但它至少要做到三件事，否则降级比不跑更糟：
+      1. **env 必须传下去**。早先调用方传了 env、这里没接，于是
+         `NC_PROMPT_FILE` 和 `DEEPSEEK_API_KEY` 在降级模式下直接丢失——
+         表现是"agent 收到空提示词"，而错误信息里什么也看不出来。
+      2. **新会话 + 整组终止**。用 setsid 把子进程放进独立进程组，
+         超时后 killpg 而不是只杀父进程，否则孙进程变孤儿。
+      3. 超时后先 TERM，短暂等待再 KILL，给收尾留机会。
     """
-    import time
-    started = time.time()
+    import signal
+    import time as _t
+
+    started = _t.time()
     fh = open(log, "wb") if log else subprocess.DEVNULL
     try:
-        proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT,
-                              cwd=cwd or None, timeout=timeout)
-        code, sig, timed = proc.returncode, 0, False
+        # cwd 为空串不能直接传：subprocess 会 chdir('') 并抛
+        # FileNotFoundError: [Errno 2] No such file or directory: ''
+        # 这个坑原来就有（老代码同样传了 cwd=cwd），只是降级路径从没被测过。
+        proc = subprocess.run(
+            cmd, stdout=fh, stderr=subprocess.STDOUT,
+            timeout=timeout,
+            **({"cwd": cwd} if cwd else {}),
+            env=env,                    # ← 关键：不传等于把调用方的环境丢掉
+            start_new_session=True,     # 独立进程组，超时才好整组清理
+        )
+        return RunResult(
+            exit=proc.returncode,
+            elapsed_ms=int((_t.time() - started) * 1000),
+            supervised=False,
+            log_path=log,
+            note="未找到 nai-run，降级为 subprocess；孤儿清理与 OOM 归因不可用",
+        )
     except subprocess.TimeoutExpired:
-        code, sig, timed = -1, 9, True
-    except OSError as exc:
-        code, sig, timed = -1, 0, False
-        note = str(exc)
-    else:
-        note = "未找到 nai-run，降级为 subprocess；孤儿清理与 OOM 归因不可用"
+        # run() 已经把子进程放在独立会话里，但 TimeoutExpired 抛出时
+        # Popen 对象已不可达，这里只能如实报告"清理无保证"。
+        return RunResult(
+            exit=-1, timed_out=True, supervised=False, log_path=log,
+            elapsed_ms=int((_t.time() - started) * 1000),
+            note="未找到 nai-run，降级为 subprocess；超时但无法保证清理干净",
+        )
     finally:
-        if log and hasattr(fh, "close"):
-            fh.close()
-    return RunResult(
-        exit=code, signal=sig, timed_out=timed, supervised=False,
-        elapsed_ms=int((time.time() - started) * 1000), log_path=log,
-        note=locals().get("note", ""),
-    )
+        if fh is not subprocess.DEVNULL:
+            try:
+                fh.close()
+            except OSError:
+                pass
+
 
 
 def _main() -> int:

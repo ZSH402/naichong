@@ -91,6 +91,20 @@ export class ClaimStore {
    */
   private readonly controlGate: ((ref: string) => { ok: true } | { ok: false; reason: string }) | undefined
 
+  /**
+   * 升级 confirmed 时是否要求存在对照证据（baseline / control）。
+   *
+   * 默认 **true**：证据链的立场应该是"没有对照就不算确认"。
+   * 早先 verified 模式只数"两条不同 pathKey 的强证据"，完全不看对照——
+   * 同一类漏洞用两个自命名 pathKey 挂两条系统读取的文件，在没有任何
+   * baseline/control 的情况下就被标成 confirmed。这是"看起来对"与
+   * "确认存在"之间唯一的那道差别。
+   *
+   * 需要放宽的调用方显式传 false，让"没有对照也 confirmed"成为
+   * **主动选择**，而不是默认行为。
+   */
+  readonly requireCounterpart: boolean
+
   constructor(
     session?: Session,
     options: {
@@ -98,6 +112,7 @@ export class ClaimStore {
       storePath?: string
       onProgress?: (event: ClaimProgressEvent) => void
       controlGate?: (ref: string) => { ok: true } | { ok: false; reason: string }
+      requireCounterpart?: boolean
     } = {},
   ) {
     this.session = session
@@ -105,6 +120,7 @@ export class ClaimStore {
     this.storePath = options.storePath
     this.onProgress = options.onProgress
     this.controlGate = options.controlGate
+    this.requireCounterpart = options.requireCounterpart ?? true
     if (this.storePath !== undefined) this.loadSnapshot()
   }
 
@@ -280,7 +296,7 @@ export class ClaimStore {
       // 要「可重放」那一级就走 mode: 'replay'，那里才要求 replay.verified === true。
       // 早先这里的注释写成「confirmed 必须至少有一条 replay.verified」，与实现不符，
       // 已按实测行为改正（两条文件证据确实能到 confirmed）。
-      { mode: 'verified' },
+      { mode: 'verified', requireCounterpart: this.requireCounterpart },
     )
     if (next === prev) return { ok: true, claim: prev, rejected: 'duplicate' }
     const committed = this.commit(next)

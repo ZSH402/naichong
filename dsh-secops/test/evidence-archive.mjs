@@ -76,7 +76,24 @@ await call('worker_submit', {
 await runner.drain()
 const after3 = store.get(claim.id)
 check('different kind adds a path', after3?.independentPaths === 2, after3?.independentPaths)
-check('promoted to confirmed', after3?.status === 'confirmed', after3?.status)
+// 两条独立强路径还不够：ClaimStore 默认要求**存在对照证据**才升级 confirmed。
+// 没有 baseline（目标正常情况）或 control（检测器校准）时只到 partial——
+// 这是"看起来对"与"确认存在"之间唯一的那道差别。
+check('两条强路径但无对照只到 partial', after3?.status === 'partial', after3?.status)
+
+// ── 3b. 补一条 baseline 对照 → 才允许 confirmed
+const baseFile = path.join(root, 'baseline.txt')
+fs.writeFileSync(baseFile, 'GET /api/order?id=1 -> 200 {"owner":"self","amount":10}\n')
+// 这个测试文件没装 claim_evidence 工具，直接用 store 的底层接口登记对照证据
+store.attach(claim.id, {
+  ref: 'baseline-normal-request',
+  pathKey: 'baseline:normal',
+  role: 'baseline',
+  artifact: fs.readFileSync(baseFile, 'utf8'),
+  artifactTrusted: true,
+})
+const after4 = store.get(claim.id)
+check('补了 baseline 对照后升级 confirmed', after4?.status === 'confirmed', after4?.status)
 
 // ── 4. 失败任务不附证据
 const claim2 = store.assert('POST /api/transfer 接受负数金额')

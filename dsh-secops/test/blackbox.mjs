@@ -109,7 +109,7 @@ try {
     await get('/api/reset')
     const r = await cli(['race', '--base', BASE, '--path', '/api/redeem',
       '--body', 'coupon=WELCOME', '--ids', ids[0], '--method', 'POST',
-      '--count', '8', '--reset-url', '/api/reset'], 300_000)
+      '--count', '12', '--reset-url', '/api/reset'], 300_000)
     check('竞态判定为 race-detected', r.verdict === 'race-detected', r.verdict)
     check('给了多轮数据而非单次结论', Array.isArray(r.rounds_data) && r.rounds_data.length >= 3, r.rounds_data?.length)
     const raced = (r.rounds_data ?? []).some((d) => d.successes.concurrent > d.successes.sequential)

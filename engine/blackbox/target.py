@@ -196,7 +196,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             # 缺陷 4：检查与扣减之间没有原子性
             if BALANCES[user] >= PRICE:
-                time.sleep(0.005)              # ← 窗口
+                time.sleep(0.02)               # ← 窗口（20ms：5ms 太小，调度抖动会让并发撞不进去）
                 BALANCES[user] -= PRICE
                 COUPONS[coupon] -= 1
                 self._json(200, {"status": "redeemed", "balance": BALANCES[user]})

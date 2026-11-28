@@ -97,11 +97,19 @@ class Scaffold:
     def observe(self, status: int, headers: dict[str, str], body: str) -> dict[str, Any]:
         cfg = self.layers["L_P"].config
         h = denoise_headers(headers) if cfg["strip_noise_headers"] else dict(headers)
+
+        # **先清洗再截断**，顺序不能反。
+        #
+        # 早先是先按 max_body_chars 截原始 HTML、再 _summarize_html。
+        # 如果页面前 4KB 全是 <head><style>…</style><script>…</script>，
+        # 截断点落在 <script> 中间：闭合标签没了，_summarize_html 的
+        # 非贪婪 `</script>` 匹配不上，整段"脚本"会被当成正文留下——
+        # 或者相反，清洗后返回空串，正文里的 API 线索全丢。
         b = body
-        if cfg["max_body_chars"] and len(b) > cfg["max_body_chars"]:
-            b = b[: cfg["max_body_chars"]] + f"\n…[truncated, total {len(body)} chars]"
         if cfg["summarize_html"]:
             b = _summarize_html(b)
+        if cfg["max_body_chars"] and len(b) > cfg["max_body_chars"]:
+            b = b[: cfg["max_body_chars"]] + f"\n…[truncated, total {len(body)} chars]"
         if cfg["neutralize_terms"]:
             b = neutralize(b)
         return {"status": status, "headers": h, "body": b}

@@ -259,7 +259,7 @@ def parse_ffuf_json(path: str) -> list[Asset]:
 
 # —————————————————————— 存储 ——————————————————————
 
-DEFAULT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "findings")
+DEFAULT_ROOT = "/root/tpctf/findings"
 
 
 class Store:
@@ -296,10 +296,20 @@ class Store:
         seen: set[str] = set()
         rows: list[BaseModel] = []
         for r in records:
-            key = getattr(r, "asset_id", None) or getattr(r, "finding_id", None) \
-                or getattr(r, "evidence_id", None) or ""
+            # 去重要用**同一套字段**取和比。
+            # 早先 key 兼容 asset_id / finding_id / evidence_id，
+            # 但过滤重复时硬编码成 getattr(x, "asset_id")——finding 和 evidence
+            # 根本没有 asset_id，比较恒为 True，于是重复项一条都没去掉。
+            key = ""
+            for attr in ("asset_id", "finding_id", "evidence_id"):
+                v = getattr(r, attr, None)
+                if v:
+                    key = str(v)
+                    break
             if key and key in seen:
-                rows = [x for x in rows if getattr(x, "asset_id", None) != key] 
+                rows = [x for x in rows if not any(
+                    str(getattr(x, a, "") or "") == key
+                    for a in ("asset_id", "finding_id", "evidence_id"))]
             if key:
                 seen.add(key)
             rows.append(r)
@@ -330,10 +340,16 @@ class Store:
         ):
             p = self._path(name)
             if os.path.exists(p) and os.path.getsize(p) > 0:
-                # read_json_auto 会按文件推断列；显式给列类型可避免空文件/缺列导致视图失败
+                # read_json_auto 会按文件推断列；显式给列类型可避免空文件/缺列导致视图失败。
+                #
+                # 路径必须转义：早先是 f-string 直接拼进 SQL，工作目录名里
+                # 只要有一个单引号（`o'brien-case` 这种）就整条语句语法错误，
+                # 而且报错发生在建视图阶段——所有查询一起挂掉，看起来像"库坏了"。
+                # DuckDB 的字符串字面量用两个单引号转义，和标准 SQL 一致。
+                safe_p = p.replace("'", "''")
                 self.con.execute(
                     f"CREATE OR REPLACE VIEW {name} AS "
-                    f"SELECT * FROM read_json_auto('{p}', format='newline_delimited')"
+                    f"SELECT * FROM read_json_auto('{safe_p}', format='newline_delimited')"
                 )
             else:
                 # 没有数据也建空视图，查询才不会因为"表不存在"而失败

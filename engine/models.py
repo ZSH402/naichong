@@ -32,6 +32,8 @@
 """
 from __future__ import annotations
 
+import re
+
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -88,9 +90,29 @@ class Verdict(BaseModel):
         if not isinstance(v, str):
             return v
         s = v.strip().lower()
-        for k in ("confirmed", "refuted", "inconclusive"):
-            if k in s:
-                return k
+
+        # 否定式必须先判，且必须在子串匹配之前。
+        #
+        # 这里踩过一个能伪造证据的坑：原实现是
+        #     for k in ("confirmed", "refuted", "inconclusive"):
+        #         if k in s: return k
+        # 于是 `"not confirmed"` 因为含子串 "confirmed" 被归一成 confirmed，
+        # `"未确认"` 也一样。模型写"not confirmed"本是明确否定，结果被
+        # 永久写成 confirmed 进了全局状态——这比不判更糟，因为它伪造了证据。
+        if re.search(r"\b(not|un|non)[\s_-]*(confirmed|verified|proven)\b", s):
+            return "inconclusive"
+        if re.search(r"\b(not|un|non)[\s_-]*(refuted|excluded)\b", s):
+            return "inconclusive"
+        if re.search(r"(未确认|待确认|无法确认|不确认|尚未确认|未经确认)", s):
+            return "inconclusive"
+        if re.search(r"(未证伪|待证伪|尚未证伪)", s):
+            return "inconclusive"
+
+        # 再走边界匹配，避免 "confirmedly..." / "refuted_case" 这类误命中
+        m = re.match(r"^(confirmed|refuted|inconclusive)\b", s)
+        if m is not None:
+            return m.group(1)
+        # 中文写在前面也可能（"确认存在越权"），但仍然不许否定式混进来
         if "证伪" in s or "否定" in s or "排除" in s:
             return "refuted"
         if "确认" in s or "证实" in s or "成立" in s:

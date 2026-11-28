@@ -18,6 +18,9 @@ import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 
 /** 构造一条 user 消息。id 必须是唯一且稳定的字符串品牌，直接用 uuid。 */
+/** 纠偏提醒的统一前缀，用来识别并清理历史里的旧提醒。 */
+const nudgePrefix = '[secops/stall]'
+
 function userMessage(text: string): UserMessage {
   return {
     id: randomUUID() as UserMessage['id'],
@@ -241,7 +244,23 @@ export function installStallGuard(ctx: Context, options: StallGuardOptions = {})
     if (pendingApproach !== undefined) {
       const note = pendingApproach
       pendingApproach = undefined
-      return { kind: 'enter', messages: [...decision.messages, userMessage(note)] }
+      // 去重：同一段纠偏话术已经在历史里就不再追加。
+      //
+      // 上层循环会保留 step 间消息历史，多次 nudge 后同一位置躺着几条
+      // 结构相似的提醒——它们不但没用，还会把当前观测挤出注意力窗口。
+      // 判据用**完整文本相等**而不是前缀：不同 streak 生成的提醒本来就不该
+      // 被合并（它们是递进的），只有逐字相同才算重复。
+      const textOf = (m: { role: string; content?: unknown }): string | undefined =>
+        m.role === 'user' && typeof m.content === 'string' ? m.content : undefined
+      const dup = decision.messages.some((m) => textOf(m as { role: string; content?: unknown }) === note)
+      // 已经说过同样的话 → 不改动，直接走原流程
+      if (dup) return decision
+      // 更早的同前缀提醒先撤掉，只留最新一条
+      const kept = decision.messages.filter((m) => {
+        const t = textOf(m as { role: string; content?: unknown })
+        return t === undefined || !t.startsWith(nudgePrefix)
+      })
+      return { kind: 'enter', messages: [...kept, userMessage(note)] }
     }
 
     const verdict = detector.shouldNudge()
