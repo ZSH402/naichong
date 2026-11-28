@@ -715,7 +715,13 @@ def build_prompt(st: dict) -> str:
         '  "conclusion": "一句话：这轮有什么进展，或者卡在哪",',
         '  "verdicts": [{"id": "H1", "observation": "实测到了什么", "verdict": "refuted"}],',
         '  "excluded": [{"path": "哪条路走不通", "evidence": "依据（命令/地址/对照实验）"}],',
-        '  "hypotheses": [{"statement": "新假设", "falsify_by": "什么观测能证明它错"}],',
+        '  "hypotheses": [{"statement": "新假设", "falsify_by": "什么观测能证明它错", "origin": "从哪看出来的"}],',
+        # 观察字段必须出现在**格式示例**里，否则模型不会写。
+        # 实测：prompt 正文加了「你自己提假设」的引导，但示例 JSON 里没有
+        # observations，模型就严格按示例输出，一条观察都没交回——通道形同虚设。
+        # 模型是照着示例写的，不是照着散文写的。
+        '  "observations": [{"text": "我留意到什么现象（不是结论）", "where": "哪个目标/端点", '
+        '"kind": "anomaly|pattern|question|seed|note", "confidence": "speculative|likely|confirmed"}],',
         '  "next": "下一步一句话"',
         "}",
         "```",
@@ -967,7 +973,10 @@ def run_round(st: dict, state_path: str) -> None:
         return
     prompt = build_prompt(st)
     env = dict(os.environ)
-    env.update({"PROFILE": "headless", "WORKSPACE": ws, "DEEPSEEK_API_KEY": st.get("api_key", "")})
+    # api_key 优先取状态里的（历史兼容），否则取环境变量。
+    # 状态里的那份会被 save_state 剥掉（不落盘），所以实际使用时走环境变量。
+    env.update({"PROFILE": "headless", "WORKSPACE": ws,
+                "DEEPSEEK_API_KEY": st.get("api_key") or os.environ.get("DEEPSEEK_API_KEY", "")})
     if not env["DEEPSEEK_API_KEY"]:
         env.pop("DEEPSEEK_API_KEY")
 
@@ -1141,12 +1150,13 @@ def run_round(st: dict, state_path: str) -> None:
     # 落盘本轮观察（去重、限量：池子无限长，但状态文件不能无限长）
     new_obs = [o for o in _ROUND_OBSERVATIONS]
     if new_obs:
-        st.setdefault("observations", [])
-        existing = {str(o.get("text", "")) for o in st["observations"]}
+        # StateView 是 Pydantic 模型，没有 dict.setdefault —— 直接用 get/赋值
+        obs_list = st.get("observations") or []
+        existing = {str(o.get("text", "")) for o in obs_list}
         for o in new_obs:
             if str(o.get("text", "")) not in existing:
-                st["observations"].append({**o, "round": st["round"]})
-        st["observations"] = st["observations"][-80:]   # 上限 80 条
+                obs_list.append({**o, "round": st["round"]})
+        st["observations"] = obs_list[-80:]   # 上限 80 条
         _ROUND_OBSERVATIONS.clear()
 
     problems = last_round_problems()
@@ -1242,8 +1252,14 @@ def main() -> int:
     args = ap.parse_args()
     # --target 与 --challenge 等价。前者是真实作业的语汇，后者是历史参数名，
     # 保留是为了不打断既有状态目录的命名。
-    if args.target and not args.challenge:
+    # challenge 是任务名（状态归档用），target 是实际目标（scope 检查与 prompt 用）。
+    # 早先是 `if args.target and not args.challenge: args.challenge = args.target`——
+    # 同时给两个时 target 被直接丢掉，于是 state 里没有 target，prompt 里也没有，
+    # agent 只能看到任务名 demo-test，完全不知道要打哪个域名。
+    if not args.challenge and args.target:
         args.challenge = args.target
+    if not args.target and args.challenge:
+        args.target = args.challenge
     if not args.challenge:
         ap.error("必须提供 --target 或 --challenge")
 
@@ -1262,6 +1278,7 @@ def main() -> int:
             challenge=args.challenge,
             domain=args.domain,
             mode=args.mode,
+            target=args.target,
             task_prompt=args.task_prompt,
             round=0,
             phase="converge",

@@ -351,6 +351,10 @@ class StateView(BaseModel):
             raise ValueError("状态文件缺少 challenge 字段，无法归档")
         return cls.model_validate(raw)
 
+    scope_gate: str = ""            # active / inactive:no-scope-configured / broken:*
+    scope_denied: str = ""          # 本轮被范围闸拒绝的原因
+    observations: list[dict] = Field(default_factory=list)  # 观察池（未验证）
+    next_hyp_seq: int = 0            # 假设 id 的全局序号
 
 class StallSignal(BaseModel):
     """停滞信号。
