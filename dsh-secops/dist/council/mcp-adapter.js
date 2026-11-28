@@ -9,7 +9,7 @@
  * 同源的包装工具。所以候选只声明「这个方向我用 server 的哪个工具」，
  * adapter 负责连、调、翻译。
  */
-import { McpStdioClient } from "../mcp-client.js";
+import { McpStdioClient } from '../mcp-client.js';
 /**
  * 同一进程里复用连接。
  *

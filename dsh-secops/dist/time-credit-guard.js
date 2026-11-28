@@ -10,7 +10,7 @@
  * 直接杀会丢掉它已经掌握的东西，而「没解出来但知道哪些方向不通」本身有价值。
  */
 import { randomUUID } from 'node:crypto';
-import { msToHuman } from "./time-credit.js";
+import { msToHuman } from './time-credit.js';
 function userMessage(text) {
     return {
         id: randomUUID(),

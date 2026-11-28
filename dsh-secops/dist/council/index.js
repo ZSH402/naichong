@@ -8,20 +8,20 @@
  * 为什么不让模型当三公：预算是算出来的，不是聊出来的。一个会算错余额的
  * 御史大夫，比没有御史大夫更糟——它会让「已批准」失去含义。
  */
-import { Censor } from "./censor.js";
-import { Chancellor } from "./chancellor.js";
-import { Marshal } from "./marshal.js";
-import { Roster } from "./roster.js";
-import { analyzePrecision, precisionActions } from "./precision.js";
-import { AdapterRegistry } from "./contract.js";
-import { createAgentAdapter, createCliToolAdapter } from "./adapters.js";
-export { Censor, CENSOR_DEFAULTS } from "./censor.js";
-export { Chancellor } from "./chancellor.js";
-export { Marshal } from "./marshal.js";
-export { Roster } from "./roster.js";
-export { analyzePrecision, precisionActions, agentsOfClaim, MIN_SAMPLE } from "./precision.js";
-export * from "./contract.js";
-export * from "./adapters.js";
+import { Censor } from './censor.js';
+import { Chancellor } from './chancellor.js';
+import { Marshal } from './marshal.js';
+import { Roster } from './roster.js';
+import { analyzePrecision, precisionActions } from './precision.js';
+import { AdapterRegistry } from './contract.js';
+import { createAgentAdapter, createCliToolAdapter } from './adapters.js';
+export { Censor, CENSOR_DEFAULTS } from './censor.js';
+export { Chancellor } from './chancellor.js';
+export { Marshal } from './marshal.js';
+export { Roster } from './roster.js';
+export { analyzePrecision, precisionActions, agentsOfClaim, MIN_SAMPLE } from './precision.js';
+export * from './contract.js';
+export * from './adapters.js';
 /** 把 ClaimStore 适配成丞相能读的知识源。 */
 export function createKnowledgeSource(claims, dispatchMemory) {
     return {

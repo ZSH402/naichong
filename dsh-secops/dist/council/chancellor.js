@@ -9,7 +9,7 @@
  * 真正需要语义的地方（这个目标可能有什么漏洞）由会话里的主模型承担，
  * 丞相负责把它框在可验证的范围内：每条假设必须带 direction + target + 可证伪条件。
  */
-import { detectTargetShape } from "../agent-registry.js";
+import { detectTargetShape } from '../agent-registry.js';
 let counter = 0;
 function nextId() {
     counter += 1;

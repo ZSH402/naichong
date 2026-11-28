@@ -75,7 +75,33 @@ const evidenceSchema = z.object({
      * 发行版 ls 上必须报 clean。它要是也报缺，那问题在检测器或环境。
      * 把这两件事塞进同一个 role，等于用「工具可信」冒充「目标已对照」。
      */
-    role: z.enum(['proof', 'baseline', 'control']).optional(),
+    role: z.enum(['proof', 'baseline', 'control', 'refutation']).optional(),
+    /**
+     * 反驳的明细。只在 role='refutation' 时有意义。
+     *
+     * kind 的两档是这套机制里最重要的一个区分：
+     *
+     *   decisive —— **可以据此直接判死**：符号没有任何调用方（死代码）、
+     *               路由从未注册、实测请求打不通、守卫在目标路径上确定生效。
+     *   advisory —— **只降级不下结论**："在上游找到疑似守卫，但是否覆盖这条路径
+     *               需要人判断"。这类不能自动翻转状态。
+     *
+     * 为什么必须分开：把真漏洞反驳掉（漏报）比报一条误报更糟。Refute-or-Promote
+     * 的实证里，10 个专职审查员一致认可的漏洞只被一条实证测试击毙——说明
+     * "看起来足以否定"和"足以否定"之间差着一次实证。advisory 是给模型和人的
+     * 线索，不是判决书。
+     */
+    refutation: z
+        .object({
+        kind: z.enum(['decisive', 'advisory']),
+        /** 哪个检查项得出的（dead-code / unreachable-route / guard-found / empirical-miss …）。 */
+        check: z.string(),
+        /** 事实出处：file:line，便于复核。 */
+        location: z.string().optional(),
+        /** 一句话说明看到了什么。 */
+        detail: z.string().optional(),
+    })
+        .optional(),
     /** 来源（worker 任务），用于重放。手工证据没有这项。 */
     source: evidenceSourceSchema.optional(),
     /** 原产物的结构摘要（抹数字）。 */
@@ -141,24 +167,23 @@ export function claimIdFor(text) {
 function distinctPaths(evidence) {
     return new Set(evidence.map((e) => e.pathKey)).size;
 }
-/**
- * 由证据与显式状态推导 claim 的状态。
- *
- * 纯函数，便于单测：给定 evidence 与是否被显式证伪，返回状态。
- * 规则：
- *   - refuted 是一个单向闸门：一旦证伪，不会被新证据翻回来（要翻回来必须显式 reassert）
- *   - 独立路径数达到阈值 → confirmed
- *   - 有证据但不足阈值 → partial
- *   - 无证据 → hypothesis
- */
 export function deriveStatus(evidence, options = {}) {
     if (options.refuted === true)
         return 'refuted';
+    // 硬反驳优先：必须是 strong（系统读取的文件/记录），不接受模型自述。
+    // 一票否决的理由见 role 注释——正向证据的数量不构成对硬事实的抵抗。
+    // 只有 decisive 的反驳才翻转状态。advisory 留在证据里供复核，不动状态——
+    // 见 evidenceSchema.refutation 的注释：把真漏洞反驳掉比报误报更糟。
+    if (evidence.some((e) => e.role === 'refutation' &&
+        e.relevance?.strength === 'strong' &&
+        e.refutation?.kind === 'decisive')) {
+        return 'refuted';
+    }
     if (options.inference === true)
         return 'inference';
     // baseline 是对照，不构成「证明了几条独立路径」。把它算进去，
     // 两条正常请求就能把一条断言推到 confirmed——那正是要防的事。
-    const proofOnly = evidence.filter((e) => e.role !== 'baseline' && e.role !== 'control');
+    const proofOnly = evidence.filter((e) => e.role !== 'baseline' && e.role !== 'control' && e.role !== 'refutation');
     const count = options.mode === 'replay'
         ? new Set(proofOnly
             .filter((e) => e.relevance?.strength === 'strong' && e.replay?.verified === true)
@@ -166,8 +191,17 @@ export function deriveStatus(evidence, options = {}) {
         : options.mode === 'verified'
             ? new Set(proofOnly.filter((e) => e.relevance?.strength === 'strong').map((e) => e.pathKey)).size
             : distinctPaths(proofOnly);
-    if (count >= CONFIRM_THRESHOLD)
+    if (count >= CONFIRM_THRESHOLD) {
+        if (options.requireCounterpart === true) {
+            // baseline（目标正常样本）与 control（检测器校准样本）都算对照。
+            // 一类是"这个响应正常长什么样"，一类是"这把尺子准不准"，
+            // 对升级确认来说二者居其一即可，但**不能都没有**。
+            const hasCounterpart = evidence.some((e) => (e.role === 'baseline' || e.role === 'control') && e.relevance?.strength === 'strong');
+            if (!hasCounterpart)
+                return 'partial';
+        }
         return 'confirmed';
+    }
     if (count >= 1)
         return 'partial';
     return 'hypothesis';
@@ -201,7 +235,13 @@ export function withEvidence(claim, evidence, options = {}) {
         ...claim,
         evidence: next,
         independentPaths: distinctPaths(next),
-        status: deriveStatus(next, { refuted, ...(options.mode === undefined ? {} : { mode: options.mode }) }),
+        status: deriveStatus(next, {
+            refuted,
+            ...(options.mode === undefined ? {} : { mode: options.mode }),
+            ...(options.requireCounterpart === undefined
+                ? {}
+                : { requireCounterpart: options.requireCounterpart }),
+        }),
         updatedAt: evidence.addedAt,
     };
 }

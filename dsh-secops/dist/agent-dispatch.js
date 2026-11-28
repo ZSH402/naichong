@@ -14,8 +14,8 @@
  *      扫描器，在同一个计数器下平权，那等于用预算买噪音。
  */
 import path from 'node:path';
-import { detectTargetShape } from "./agent-registry.js";
-import { COST_WEIGHT, fitness } from "./agent-registry.js";
+import { detectTargetShape } from './agent-registry.js';
+import { COST_WEIGHT, fitness } from './agent-registry.js';
 export const DEFAULT_POLICY = {
     maxAttempts: 2,
     deadlineMs: 5 * 60 * 1000,

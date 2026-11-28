@@ -14,7 +14,7 @@
  * 不满足就明确拒绝，并告诉它还缺什么。**拒绝时不说答案对不对**——
  * 我们说不了，也不该假装能说。
  */
-import { CONFIRM_THRESHOLD, verificationOf } from "./provenance.js";
+import { CONFIRM_THRESHOLD, verificationOf } from './provenance.js';
 const ANSWER_SCHEMA = {
     type: 'object',
     properties: {

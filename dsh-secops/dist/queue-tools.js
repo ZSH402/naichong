@@ -7,7 +7,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { digestArtifact, digestArtifactStrict } from "./replay.js";
+import { digestArtifact, digestArtifactStrict } from './replay.js';
 const STATUS_SCHEMA = {
     type: 'object',
     properties: {

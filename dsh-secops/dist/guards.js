@@ -34,7 +34,19 @@
  */
 const IPV4 = /\b((?:\d{1,3}\.){3}\d{1,3})\b/g;
 const HOST_PORT = /\b([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+):(\d{1,5})\b/gi;
-const BARE_DOMAIN = /\b((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|cn|dev|local|example|test|internal|cloud|app|site|xyz|top|info|biz|me|co|ai|edu|gov|mil|int))\b/gi;
+/**
+ * IPv6 字面量（含方括号与压缩形式）。
+ *
+ * 早先只认 IPv4 与域名，`https://[::1]/x` 这类目标直接漏过范围检查——
+ * 而回环/内网 IPv6 恰恰是 SSRF 和本地服务的常见入口。
+ */
+const IPV6_LITERAL = /\[([0-9a-fA-F:]{2,45})\]/g
+    .source;
+// TLD 白名单。除了公网常见后缀，必须包含**内网专用后缀**——
+// 真实渗透目标里 .corp / .lan / .svc / .intranet / .office 比 .com 更常见，
+// 漏掉它们等于范围闸对内网目标失效（而内网恰恰是最需要闸的地方）。
+// .cluster.local 由 `local` 覆盖（正则匹配最后一个标签）。
+const BARE_DOMAIN = /\b((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|cn|dev|local|example|test|internal|cloud|app|site|xyz|top|info|biz|me|co|ai|edu|gov|mil|int|corp|lan|svc|intranet|office|home|arpa|onion))\b/gi;
 function validIpv4(v) {
     const parts = v.split('.');
     if (parts.length !== 4)
@@ -66,6 +78,12 @@ export function extractTargets(toolName, args) {
         // 2) host:port（含域名带端口、IPv4 带端口）
         for (const m of value.matchAll(HOST_PORT))
             add(m[1]);
+        // 2b) IPv6 字面量：`[::1]` / `[2001:db8::1]`
+        for (const m of value.matchAll(new RegExp(IPV6_LITERAL, 'g'))) {
+            const v = m[1];
+            if (v !== undefined && v.includes(':'))
+                add(v.toLowerCase());
+        }
         // 3) 裸 IPv4（校验取值，排除 1.2.3.4 这类版本号误伤：
         //    版本号通常出现在 `v1.2.3` 这种紧邻字母的位置，用边界判断已能过滤大半）
         for (const m of value.matchAll(IPV4)) {
@@ -152,10 +170,19 @@ export function installBudgetGuard(ctx, config) {
     }
     const startedAt = Date.now();
     let calls = 0;
+    // 计数点放在**所有拒绝分支之后**。
+    //
+    // 早先是首行 `calls += 1`，于是被自己拒绝的调用也吃配额：预算耗尽后
+    // 模型每次重试都让 calls 继续涨，错误信息里的数字越来越离谱，
+    // 而它一次真正的探测都没做。
+    //
+    // 已知局限：别的闸（scope / tool-deny）在**另一个 guard 里**先拒绝时，
+    // 这个 guard 仍然会被调用并计数——DSH 的 guard 语义是"全部都要跑"，
+    // 这里看不到最终裁决结果。要彻底解决需要把计数搬到执行 hook 上，
+    // 那是另一套机制；当前改动至少保证"被自己拒绝的不再膨胀"。
     const guard = (exec) => {
-        calls += 1;
-        if (config.maxToolCalls !== undefined && calls > config.maxToolCalls) {
-            return `[secops/budget] tool-call budget exhausted (${calls} > ${config.maxToolCalls})`;
+        if (config.maxToolCalls !== undefined && calls >= config.maxToolCalls) {
+            return `[secops/budget] tool-call budget exhausted (${calls} >= ${config.maxToolCalls})`;
         }
         if (config.maxWallClockMs !== undefined) {
             const elapsed = Date.now() - startedAt;
@@ -163,6 +190,7 @@ export function installBudgetGuard(ctx, config) {
                 return `[secops/budget] wall-clock budget exhausted (${elapsed}ms > ${config.maxWallClockMs}ms)`;
             }
         }
+        calls += 1;
         void exec;
         return undefined;
     };

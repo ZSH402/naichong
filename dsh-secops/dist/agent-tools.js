@@ -10,7 +10,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { classifyProcess } from "./agent-dispatch.js";
+import { classifyProcess } from './agent-dispatch.js';
 const MAX_VERDICT_BYTES = 32 * 1024 * 1024;
 const DIRECTIONS_SCHEMA = {
     type: 'object',

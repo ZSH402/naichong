@@ -59,7 +59,7 @@
  *
  * 这个序就是想要的：赢过的在前，没试过的还有机会，失过手的往后但不除名。
  */
-import { agentsOfClaim } from "./precision.js";
+import { agentsOfClaim } from './precision.js';
 /** 中性值：没跑过的牌拿这个分，排序上既不加分也不减分。 */
 export const CREDIT_NEUTRAL = 0.5;
 /** 下限。再差的牌也保留一点机会——完全清零等于永久弃用，而误报常常是解析器的错。 */

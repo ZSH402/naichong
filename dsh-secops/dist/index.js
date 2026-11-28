@@ -13,41 +13,51 @@
  *     所以安全拦截一律走 guard，不走 pre-step。
  */
 import path from 'node:path';
-import { installBudgetGuard, installScopeGuard, installToolDenyGuard } from "./guards.js";
-import { installDecisionStage } from "./decision.js";
-import { DecisionPolicy } from "./decision-policy.js";
-import { decisionTools } from "./decision-tools.js";
-import { EgressProxy } from "./egress.js";
-import { ModelFallback } from "./model-fallback.js";
-import { classifyRisk, defaultHardFloor, needsApproval } from "./hitl.js";
-import { ClaimStore, installProvenanceTools } from "./provenance-tools.js";
-import { registerProvenanceProjection } from "./provenance.js";
-import { QueueRunner } from "./queue-runner.js";
-import { createEvidenceArchiver, installQueueTools } from "./queue-tools.js";
-import { SessionManager } from "./session-manager.js";
-import { sessionTools } from "./session-tools.js";
-import { installSessionGuard } from "./session-guard.js";
-import { installStallGuard } from "./stall-guard.js";
-import { installShortcutGuard } from "./shortcut-guard.js";
-import { installGuidanceGuard, GUIDANCE_FILENAME } from "./guidance.js";
-import { installAnswerTools } from "./answer-tools.js";
-import { installDataProfileTools } from "./data-profile.js";
-import { CoverageLedger, installCoverageTools } from "./coverage.js";
-import { AssetStore, assetTools } from "./asset-store.js";
-import { checkWiring, reportWiring } from "./wiring-check.js";
-import { ArtexClient, createArtexAdapter } from "./council/artex-adapter.js";
-import { createMcpAdapter, closeAllMcpClients } from "./council/mcp-adapter.js";
-import { defaultMcpBindings } from "./mcp-bindings.js";
-import { TimeCredit } from "./time-credit.js";
-import { creditForProgress, installTimeCreditGuard, installTimeCreditTools } from "./time-credit-guard.js";
-import { AgentRegistry, DEFAULT_AGENTS, probeAgents } from "./agent-registry.js";
-import { ControlLedger, controlGateOf } from "./control-check.js";
-import { CreditBoard } from "./council/credit.js";
-import { installControlTools } from "./control-tools.js";
-import { DirectionalDispatcher } from "./agent-dispatch.js";
-import { createQueueAttempt, installAgentTools } from "./agent-tools.js";
-import { Council, installCouncilTools } from "./council/index.js";
-import { resolveConfig } from "./config.js";
+import { installBudgetGuard, installScopeGuard, installToolDenyGuard } from './guards.js';
+import { installDecisionStage } from './decision.js';
+import { DecisionPolicy } from './decision-policy.js';
+import { decisionTools } from './decision-tools.js';
+import { EgressProxy } from './egress.js';
+import { ModelFallback } from './model-fallback.js';
+import { classifyRisk, defaultHardFloor, needsApproval } from './hitl.js';
+import { ClaimStore, installProvenanceTools } from './provenance-tools.js';
+import { refuteTools } from './refute-tools.js';
+import { oracleTools } from './oracle-tools.js';
+import { patchTools } from './patch-tools.js';
+import { graphTools } from './graph-tools.js';
+import { searchTools } from './search-tools.js';
+import { fuzzTools } from './fuzz-tools.js';
+import { semgrepTools } from './semgrep-tools.js';
+import { blackboxTools } from './blackbox-tools.js';
+import { registerProvenanceProjection } from './provenance.js';
+import { QueueRunner } from './queue-runner.js';
+import { createEvidenceArchiver, installQueueTools } from './queue-tools.js';
+import { SessionManager } from './session-manager.js';
+import { sessionTools } from './session-tools.js';
+import { installSessionGuard } from './session-guard.js';
+import { installStallGuard } from './stall-guard.js';
+import { installShortcutGuard } from './shortcut-guard.js';
+import { installGuidanceGuard, GUIDANCE_FILENAME } from './guidance.js';
+import { installAnswerTools } from './answer-tools.js';
+import { installDataProfileTools } from './data-profile.js';
+import { CoverageLedger, installCoverageTools } from './coverage.js';
+import { AssetStore, assetTools } from './asset-store.js';
+import { CveStore } from './cve-store.js';
+import { cveTools } from './cve-tools.js';
+import { checkWiring, reportWiring } from './wiring-check.js';
+import { ArtexClient, createArtexAdapter } from './council/artex-adapter.js';
+import { createMcpAdapter, closeAllMcpClients } from './council/mcp-adapter.js';
+import { defaultMcpBindings } from './mcp-bindings.js';
+import { TimeCredit } from './time-credit.js';
+import { creditForProgress, installTimeCreditGuard, installTimeCreditTools } from './time-credit-guard.js';
+import { AgentRegistry, DEFAULT_AGENTS, probeAgents } from './agent-registry.js';
+import { ControlLedger, controlGateOf } from './control-check.js';
+import { CreditBoard } from './council/credit.js';
+import { installControlTools } from './control-tools.js';
+import { DirectionalDispatcher } from './agent-dispatch.js';
+import { createQueueAttempt, installAgentTools } from './agent-tools.js';
+import { Council, installCouncilTools } from './council/index.js';
+import { resolveConfig } from './config.js';
 export const name = 'secops';
 /**
  * 硬依赖 tools：guard 必须注册到工具注册表上。
@@ -211,6 +221,30 @@ export async function apply(ctx, config) {
             }
         }
         installProvenanceTools(ctx, store);
+        // 白盒反驳：用确定性代码事实去杀幻觉，只杀「仓库里根本没有这个东西」这一类。
+        for (const tool of refuteTools(store))
+            ctx.tools.register(tool);
+        // 实证预言机：由系统在沙箱里跑，命中/未中/跑不成三态分开。
+        for (const tool of oracleTools(store))
+            ctx.tools.register(tool);
+        // 补丁变体：把一次修复变成在同类代码里找漏项。
+        for (const tool of patchTools())
+            ctx.tools.register(tool);
+        // 调用图与切片：结构问题不能靠字符串搜索回答。
+        for (const tool of graphTools())
+            ctx.tools.register(tool);
+        // 假设排序：把"下一步测什么"从直觉换成可解释的 UCB1。
+        for (const tool of searchTools(store))
+            ctx.tools.register(tool);
+        // 混合执行：插桩编译 / 覆盖率引导 fuzz / 约束求解。
+        for (const tool of fuzzTools())
+            ctx.tools.register(tool);
+        // 规则执行：补丁变体生成的规则必须真的跑一遍才算证据。
+        for (const tool of semgrepTools())
+            ctx.tools.register(tool);
+        // 纯黑盒探测：确定性原语（测绘/差分/异常/竞态/状态机）+ 护栏。
+        for (const tool of blackboxTools())
+            ctx.tools.register(tool);
         // 答案必须有 confirmed 的 claim 撑着，否则只能按推测报告。
         installAnswerTools(ctx, store);
         ctx.logger.info(`secops: provenance tools armed (claim_assert / claim_evidence / claim_verify / claim_refute / claim_query, ` +
@@ -325,6 +359,12 @@ export async function apply(ctx, config) {
         const assets = new AssetStore(`${baseDirForState}/.dsh-secops/assets.jsonl`);
         for (const tool of assetTools(assets))
             ctx.tools.register(tool);
+        // CVE 索引：把「指纹 + 版本」变成可检索的候选列表。离线，作业前建一次。
+        const cveIndexPath = `${baseDirForState}/.dsh-secops/cve-index.jsonl`;
+        const cves = new CveStore({ path: cveIndexPath }).load();
+        for (const tool of cveTools(cves, { indexPath: cveIndexPath }))
+            ctx.tools.register(tool);
+        ctx.logger.info(`secops: cve index armed (${String(cves.stats().total)} record(s) recovered)`);
         // 启动时先把接线问题喊出来，别等第一次派活才发现。
         reportWiring(checkWiring(DEFAULT_AGENTS), {
             info: (m) => ctx.logger.info(m),

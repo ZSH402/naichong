@@ -50,13 +50,50 @@ export function structuralDigest(text) {
  *
  * 保留：单词、URL 路径、状态码词、标点结构。
  */
+/**
+ * 索引 → 双射字母（A..Z, AA..AZ, BA..）。
+ *
+ * 为什么必须是字母：摘要流水线里有一道 `\d+ → <n>` 的数字归一化，
+ * 任何数字索引都会被它抹掉，哨兵就还原不回来。
+ * 为什么不能用单字母：只有 26 个槽位，而扫描工具单次输出几十个状态码是常态，
+ * 超出的会互相覆盖——500 被写成 200 参与哈希，重放判据就失效了。
+ */
+function encodeIndex(n) {
+    let s = '';
+    let v = n + 1;
+    while (v > 0) {
+        const r = (v - 1) % 26;
+        s = String.fromCharCode(65 + r) + s;
+        v = Math.floor((v - 1) / 26);
+    }
+    return s;
+}
+function decodeIndex(code) {
+    let v = 0;
+    for (const ch of code)
+        v = v * 26 + (ch.charCodeAt(0) - 64);
+    return v - 1;
+}
 export function skeletonDigest(text) {
     // 状态码先用哨兵保护，否则会在随后的数字归一化里被再次抹掉。
     const statuses = [];
     const guarded = text.replace(/((?:->|=>|status\s*[:=]?|code\s*[:=]?|HTTP\/[\d.]+\s+)\s*)([1-5]\d{2})\b/gi, (_m, pre, code) => {
-        // 哨兵索引必须用字母：数字索引会被下一轮数字归一化一起抹掉。
+        // 哨兵必须避开数字（会被下一轮 \d+ 归一化抹掉），也**不能用固定字母空间**。
+        //
+        // 早先用 `String.fromCharCode(65 + ((n-1) % 26))`：只有 26 个槽位。
+        // ffuf/httpx/nuclei 单次输出几十个不同状态码是常态，第 27 个会复用 'A'，
+        // 还原时全部替换成 statuses[0]，500/403 被静默篡改成 200 参与哈希比对——
+        // 重放判定因此不可信。
+        //
+        // 还有一个边界：statuses.length 为 0 时 `(0-1) % 26 === -1`，
+        // 得到 '@'，而还原正则只认 [A-Z]，哨兵原样留在摘要里。
+        //
+        // 现在用变长数字标记：`\u0000S<index>\u0000`。它不走字母空间，
+        // 且因为前缀是 \u0000（不会出现在 \d+ 匹配里，标记内部数字在还原前
+        // 已经被保护）——顺序上先还原标记、再归一化数字是不行的，
+        // 所以标记内部用 `S` 前缀让数字归一化的正则也跳过它。
         statuses.push(code);
-        return `${pre}\u0000${String.fromCharCode(65 + ((statuses.length - 1) % 26))}\u0000`;
+        return `${pre}\u0000${encodeIndex(statuses.length - 1)}\u0000`;
     });
     const skeleton = guarded
         // ISO 时间
@@ -74,8 +111,11 @@ export function skeletonDigest(text) {
         // 其余数字（计数、耗时、端口、大小）。
         // 不能用 \b\d+\b —— "12ms" 里数字与字母之间不是单词边界，会漏掉。
         .replace(/\d+/g, '<n>')
-        // 还原受保护的状态码
-        .replace(/\u0000([A-Z])\u0000/g, (_m, ch) => `<status:${statuses[ch.charCodeAt(0) - 65]}>`)
+        // 还原受保护的状态码（双射字母索引，不受 26 槽位限制，也不会被数字归一化吃掉）
+        .replace(/\u0000([A-Z]+)\u0000/g, (_m, code) => {
+        const idx = decodeIndex(code);
+        return `<status:${statuses[idx] ?? '?'}>`;
+    })
         // 连续空白
         .replace(/\s+/g, ' ')
         .trim();
@@ -115,15 +155,35 @@ export async function replayCommand(request) {
                 }
             }
         };
+        // 先 TERM 再 KILL：只发 TERM 的话，忽略该信号的进程（或持有 stdout pipe
+        // 未关闭的子进程）会让 Promise 永远不 resolve——表现是重放卡死，
+        // 而不是失败。5 秒后补一刀 SIGKILL。
+        let killTimer;
         const timer = setTimeout(() => {
             timedOut = true;
             killGroup();
+            killTimer = setTimeout(() => {
+                try {
+                    if (child.pid !== undefined)
+                        process.kill(-child.pid, 'SIGKILL');
+                }
+                catch {
+                    try {
+                        child.kill('SIGKILL');
+                    }
+                    catch {
+                        /* already gone */
+                    }
+                }
+            }, 5000);
         }, timeoutMs);
         const finish = (exitCode, spawnError) => {
             if (settled)
                 return;
             settled = true;
             clearTimeout(timer);
+            if (killTimer !== undefined)
+                clearTimeout(killTimer);
             const combined = `${stdout}\n${stderr}`.slice(0, limit);
             const digest = skeletonDigest(combined);
             const strict = strictDigest(combined);

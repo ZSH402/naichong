@@ -12,8 +12,8 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { TaskQueueStore } from "./queue-store.js";
-import { netnsCommand } from "./netns.js";
+import { TaskQueueStore } from './queue-store.js';
+import { netnsCommand } from './netns.js';
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_CAPTURE_FILE_BYTES = 64 * 1024 * 1024;
 function deriveId(kind, argv, cwd) {

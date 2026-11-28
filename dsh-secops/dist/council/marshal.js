@@ -9,9 +9,9 @@
  * 带着原因进汇总。计划是一次性的，可观测性不是。
  */
 import fs from 'node:fs';
-import { nextTaskId } from "./contract.js";
-import { estimateCost } from "./adapters.js";
-import { extractAssets } from "../asset-store.js";
+import { nextTaskId } from './contract.js';
+import { estimateCost } from './adapters.js';
+import { extractAssets } from '../asset-store.js';
 /** 任务结局 → 覆盖戳状态。没测成和测过没发现必须分开。 */
 function stampStatusOf(outcome, reason) {
     if (outcome === 'settled')

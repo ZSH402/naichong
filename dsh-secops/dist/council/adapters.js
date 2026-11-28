@@ -4,8 +4,8 @@
  * 现在只有 CLI 一种真正可用，但接口必须先立起来——否则「统一任务契约」
  * 只是一句口号，将来加 subagent 或自研 worker 时又要在下游到处加分支。
  */
-import { buildEvidenceManifest } from "./contract.js";
-import { COST_WEIGHT } from "../agent-registry.js";
+import { buildEvidenceManifest } from './contract.js';
+import { COST_WEIGHT } from '../agent-registry.js';
 /** 调度器的结果 → 任务契约的终态。 */
 function mapOutcome(stopReason, settled) {
     if (settled)

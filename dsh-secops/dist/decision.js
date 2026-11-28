@@ -9,8 +9,8 @@
  * 决策记录通过 `appendPluginRecord` 落到 session log，由 `secopsDecisions`
  * projection 折叠。会话恢复后记录自动重建（session log 是 append-only 的）。
  */
-import { DecisionPolicy } from "./decision-policy.js";
-import { recordDecision, registerDecisionProjection, } from "./decision-record.js";
+import { DecisionPolicy } from './decision-policy.js';
+import { recordDecision, registerDecisionProjection, } from './decision-record.js';
 export async function installDecisionStage(ctx, config, options = {}) {
     const policy = options.policy ?? new DecisionPolicy();
     // sessionProjections 是可选增强：没有它时决策只进日志，不落 session log。

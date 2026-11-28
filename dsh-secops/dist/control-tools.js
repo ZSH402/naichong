@@ -6,7 +6,7 @@
  * 唯一能说明结论可信的办法是拿已知样本校准工具本身。
  * 这个工具把校准变成一次显式动作，而不是指望模型自己想起来。
  */
-import { runAllControls } from "./control-check.js";
+import { runAllControls } from './control-check.js';
 const DETECTOR_SCHEMA = {
     type: 'object',
     properties: {

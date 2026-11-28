@@ -6,9 +6,9 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { checkEvidenceRelevance } from "./relevance.js";
-import { replayCommand } from "./replay.js";
-import { CONFIRM_THRESHOLD, isSettled, newClaim, pathRoles, recordClaim, verificationOf, withEvidence, withRefutation, } from "./provenance.js";
+import { checkEvidenceRelevance } from './relevance.js';
+import { replayCommand } from './replay.js';
+import { CONFIRM_THRESHOLD, isSettled, newClaim, pathRoles, recordClaim, verificationOf, withEvidence, withRefutation, } from './provenance.js';
 export class ClaimStore {
     claims = new Map();
     session;
@@ -37,12 +37,26 @@ export class ClaimStore {
      * 回去跑 detector_check，也不接受一条无法追溯来源的校准声明。
      */
     controlGate;
+    /**
+     * 升级 confirmed 时是否要求存在对照证据（baseline / control）。
+     *
+     * 默认 **true**：证据链的立场应该是"没有对照就不算确认"。
+     * 早先 verified 模式只数"两条不同 pathKey 的强证据"，完全不看对照——
+     * 同一类漏洞用两个自命名 pathKey 挂两条系统读取的文件，在没有任何
+     * baseline/control 的情况下就被标成 confirmed。这是"看起来对"与
+     * "确认存在"之间唯一的那道差别。
+     *
+     * 需要放宽的调用方显式传 false，让"没有对照也 confirmed"成为
+     * **主动选择**，而不是默认行为。
+     */
+    requireCounterpart;
     constructor(session, options = {}) {
         this.session = session;
         this.strictRelevance = options.strictRelevance ?? true;
         this.storePath = options.storePath;
         this.onProgress = options.onProgress;
         this.controlGate = options.controlGate;
+        this.requireCounterpart = options.requireCounterpart ?? true;
         if (this.storePath !== undefined)
             this.loadSnapshot();
     }
@@ -197,9 +211,13 @@ export class ClaimStore {
             relevance: { strength, matched },
             addedAt: Date.now(),
         }, 
-        // 用 verified 模式（按 relevance 推进），但 deriveStatus 里加了一道硬门槛：
-        // **confirmed 必须至少有一条 replay.verified**。见 provenance.ts 的说明。
-        { mode: 'verified' });
+        // 用 verified 模式：证据是 strong（系统记录的 argv，或系统读取的文件产物）时，
+        // 两条独立路径即可 confirmed。**这一级不要求重放** —— 文件证据属于 attested
+        // （内容可核查、未重放），这是刻意的：真实目标通常没法让你重放一遍。
+        // 要「可重放」那一级就走 mode: 'replay'，那里才要求 replay.verified === true。
+        // 早先这里的注释写成「confirmed 必须至少有一条 replay.verified」，与实现不符，
+        // 已按实测行为改正（两条文件证据确实能到 confirmed）。
+        { mode: 'verified', requireCounterpart: this.requireCounterpart });
         if (next === prev)
             return { ok: true, claim: prev, rejected: 'duplicate' };
         const committed = this.commit(next);
