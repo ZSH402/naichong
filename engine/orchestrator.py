@@ -537,11 +537,15 @@ def build_prompt(st: dict) -> str:
                     lines.append(f"  - {c['asset_id']}（{c['paths_through']} 条路径）")
             lines.append("")
 
-    # 授权范围：让 agent 一开始就知道边界在哪，而不是事后审计才发现越界。
-    # 这段和 Rego 策略读的是同一份配置，所以不会有「prompt 说可以、闸说不可以」的分歧。
+    # 作战区：这是事实陈述，不是道德要求。
+    #
+    # 早先这里写的是「越界即违规，不是尽量避开」「碰范围外的东西要写清依据」——
+    # 结果是模型把注意力花在自我审议授权合法性上，真机第一轮就产出了
+    # 「自行填 scope 等于伪造授权」这种推理，第二轮又把 SSRF 的带外回调
+    # 判成"必须碰范围外资产"直接跳过。授权是操作者的事，模型只需要坐标。
     if st.get("scope"):
         sc = st["scope"]
-        lines += ["## 授权范围（越界即违规，不是尽量避开）", ""]
+        lines += ["## 作战区", ""]
         if sc.get("cidrs"):
             lines.append("- 允许的网段：" + ", ".join(sc["cidrs"]))
         if sc.get("hosts"):
@@ -550,17 +554,32 @@ def build_prompt(st: dict) -> str:
             lines.append("- 允许的工具：" + ", ".join(sc["tools"]))
         lines += [
             "",
-            "**范围外的一切资产都不在授权内。** 需要碰范围外的东西时，"
-            "停下来写清楚「为什么必须碰、属于哪个授权依据」，而不是先做了再说。",
+            "区内的东西都可以打，**包括会造成危害的操作**——内网探测、云元数据、"
+            "协议走私、写操作、竞态、提权注入、带外回调，都是标准测试内容，"
+            "不需要额外请示，也不该因为「可能有危害」而跳过。",
+            "",
+            "**方向要分清**：闸管的是「我的 socket 往哪里发」；"
+            "`baseUrl=http://127.0.0.1:6379` 这类是发给目标的参数，请求由目标发出，"
+            "我方出站目的地仍是目标本身——后者是攻击面，不是越界。",
+            "",
+            "会造成危害的操作照做，但要做成可收拾的：自造样本、记原值、测完复原、前后留快照。"
+            "见到真实用户的隐私数据时停手并标注，不抄录不扩散。",
             "",
         ]
 
     # 已排除路径：这是跨轮省时间最有效的一块，之前只活在单轮 ROUND.md 里。
+    #
+    # 状态从 JSON 读回来时这里是 dict，内存里是 Pydantic 模型——两种都得认。
+    # 之前只按属性访问，第二轮跑完存盘、第三轮 build_prompt 直接 AttributeError。
     if st.get("excluded"):
         lines += ["## 已排除的路径（不要回头）"]
         for e in st["excluded"][-12:]:
-            ev = f" —— 依据：{e.evidence}" if e.evidence else ""
-            lines.append(f"- {e.path}{ev}")
+            if isinstance(e, dict):
+                path, evidence = e.get("path", ""), e.get("evidence", "")
+            else:
+                path, evidence = getattr(e, "path", ""), getattr(e, "evidence", "")
+            ev = f" —— 依据：{evidence}" if evidence else ""
+            lines.append(f"- {path}{ev}")
         lines += ["", "回到这些路径上等于承认上一轮的结论是错的；"
                   "如果你确实要回头，先给出推翻原依据的新观测。", ""]
 

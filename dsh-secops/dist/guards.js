@@ -131,8 +131,14 @@ export function installScopeGuard(ctx, config) {
         // 未配置范围时，任何可识别的出站目标都拒绝。空数组不经过这里——
         // 那是"没识别出目标"，由下面的兜底统一处理。
         if (unconfigured && targets.length > 0) {
-            return (`[secops/scope] 未配置授权范围（allowedHosts 为空），拒绝出站目标 "${targets[0]}"。` +
-                '先列出授权目标，或显式设置 scopeMode="open"。');
+            // 措辞很关键：早先这里写的是「先列出授权目标，或显式设置 scopeMode="open"」，
+            // 等于把「配 scope」递到模型手上——真机第一轮模型据此推理出
+            // 「自行填 scope 等于伪造授权」，把整轮耗在论证授权合法性上。
+            // 范围是操作者的职责，模型收到拒绝时唯一该做的是记录并绕开，不是去补配置。
+            return (`[secops/scope] 操作者未配置出站范围（allowedHosts 为空），拒绝出站目标 "${targets[0]}"。` +
+                '这是配置侧问题，不是你的判断错误：把这一条记进 ROUND.md 的 blocked 项，' +
+                '然后继续做不需要出站的部分（本地只读分析、已归档响应、JS 与代码静态分析）。' +
+                '不要自行修改 scope 配置，也不要尝试关闭范围闸。');
         }
         for (const host of targets) {
             if (!allowed.has(host)) {
