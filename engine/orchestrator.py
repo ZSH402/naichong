@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -86,6 +87,9 @@ def _load_scope(path: str) -> dict:
         print(f"[orch] 警告：范围文件读取失败（{exc}），本轮不注入边界；Rego 闸仍默认拒绝", flush=True)
         return {}
 STATE_DIR = "/root/tpctf/orchestrator"
+
+# 运行锁句柄。模块级持有，保证 flock 活到进程退出。
+_RUN_LOCK = None
 OVERLAY = "/root/tpctf/overlay.yml"
 # overlay 是可选增强：文件不在就不传，而不是让 DSH 启动失败
 PATCH = f"--patch {OVERLAY} " if os.path.exists(OVERLAY) else ""
@@ -169,6 +173,40 @@ def save_state(path: str, st: StateView) -> None:
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, path)
+
+
+def acquire_run_lock(state_path: str):
+    """同一个任务同时只允许一个编排进程。
+
+    为什么需要：save_state 的原子性只保证「单次写入不产生半截文件」，
+    完全不解决两个进程交替写同一份状态。实测过的现场：
+
+      - `round` 在 6→9 之间乱跳，出现 r8 目录只有 MEMORY.md、r9 目录直接是空的
+      - 一个进程起的 agent 读到的是另一个进程几分钟前写的 excluded 列表，
+        prompt 里把「上一轮没有写 ROUND.md」当成模型自己的失败
+      - dsh 侧报 `session "..." : flush on a closed handle`
+
+    起锁失败直接退出，不做「等一下再试」——两个编排器并行从来不是有意为之，
+    都是前一个没被真正杀掉（`| tail` 之类接管道时，杀 shell 不杀 python 子进程）。
+
+    返回的句柄必须活到进程结束（flock 随 fd 关闭释放）。
+    """
+    lock_path = state_path + ".lock"
+    # 用 a+ 而不是 w：w 会在 open 时就 truncate，把持锁者的 pid 抹掉；
+    # 而 a+ 在未拿到锁的情形下必须能读出对方 pid。
+    fh = open(lock_path, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.seek(0)
+        holder = fh.read().strip() or "?"
+        fh.close()
+        return None, holder
+    fh.seek(0)
+    fh.truncate()
+    fh.write(str(os.getpid()))
+    fh.flush()
+    return fh, str(os.getpid())
 
 
 def salvage_from_log(log_path: str, max_chars: int = 3000) -> str:
@@ -1284,6 +1322,13 @@ def main() -> int:
 
     os.makedirs(STATE_DIR, exist_ok=True)
     state_path = os.path.join(STATE_DIR, f"{args.challenge}.json")
+    # 拿运行锁：同一 challenge 不允许两个编排进程并存。
+    # 句柄赋给模块级变量，保证 flock 活到进程结束。
+    global _RUN_LOCK
+    _RUN_LOCK, _holder = acquire_run_lock(state_path)
+    if _RUN_LOCK is None:
+        ap.error(f"任务 {args.challenge} 已有编排进程在跑（pid={_holder}）。"
+                 f"先确认它真的结束了——`pgrep -af orchestrator.py`——再重跑。")
     st = load_state(state_path)
     if not st:
         key = ""

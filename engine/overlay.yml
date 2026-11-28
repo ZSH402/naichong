@@ -9,7 +9,13 @@
 #
 # 为什么仍要放开工具的 deniedTools：练习期曾封 web_search / web_fetch 防抄答案，
 # 但真实作业里查 CVE、查工具语法、查协议细节是正当能力，不是作弊。
+#
+# ⚠ allowedHosts 必须填。installScopeGuard 在 allowedHosts 为空时会**硬拒绝一切出站**，
+# 且这个判断发生在 Rego 之前——空的 allowedHosts 等于 Range 闸全关，
+# 不是"交给 Rego 管"。真机第 5 轮就撞上了：模型改用 curl/getent/blackbox_probe 之后
+# 全部被拦，把「配置侧阻断」误当成「目标行为」写进了排除了什么。
 - id: secops
   config:
-    allowedHosts: []
+    allowedHosts:
+      - demo-appserver-livepaas.dingtalk.com
     deniedTools: []
