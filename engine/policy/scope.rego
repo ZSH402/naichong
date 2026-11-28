@@ -30,6 +30,41 @@ _cidrs := object.get(_sc, "cidrs", [])
 _hosts := object.get(_sc, "hosts", [])
 _tools := object.get(_sc, "tools", [])
 
+# —————————————————————————— 目标规范化 ——————————————————————————
+# 真实世界里的目标几乎总带端口：`127.0.0.1:18080`、`http://127.0.0.1:18080/x`。
+# 早先直接拿 input.target 去做 net.cidr_contains 和 host 相等判断，
+# 结果这些写法**全部被拒**——而它们才是 curl 命令里实际出现的形态。
+# 端口不是授权维度的边界，剥掉它不放松任何范围，只是让匹配对上。
+#
+# 顺序不能反：先剥 scheme（否则 `http://` 里的冒号会被当端口），
+# 再剥路径，最后剥端口。
+_denorm(t) := out if {
+	s1 := regex.replace(t, `^[a-zA-Z][a-zA-Z0-9+.-]*://`, "")
+	s2 := regex.replace(s1, `/.*$`, "")
+	out := _strip_port(s2)
+}
+
+# 方括号形式一律取括号内：[::1] / [::1]:8080 都得到 ::1
+_strip_port(s) := trim(regex.find_n(`\[[^\]]+\]`, s, 1)[0], "[]") if {
+	regex.match(`^\[`, s)
+}
+
+# 非方括号且恰好一个冒号：这是 host:port
+_strip_port(s) := regex.replace(s, `:[0-9]+$`, "") if {
+	not regex.match(`^\[`, s)
+	count(split(s, ":")) == 2
+}
+
+# 非方括号且冒号数不是 2：裸 IPv6（::1）或裸 host，原样返回。
+# 早先没这三段区分，`::1` 里的 `:1` 被当端口剥掉，只剩 `:`，IPv6 用例直接挂。
+_strip_port(s) := s if {
+	not regex.match(`^\[`, s)
+	count(split(s, ":")) != 2
+}
+
+_target := _denorm(object.get(input, "target", ""))
+_host := _denorm(object.get(input, "host", ""))
+
 # —————————————————————————— 放行规则（收进集合）——————————————————————————
 
 # 用集合而不是单值规则：多条规则可能同时命中（比如一个目标同时落在两个 CIDR 里），
@@ -38,14 +73,14 @@ _tools := object.get(_sc, "tools", [])
 rules contains "connect.in_cidr" if {
 	input.action == "connect"
 	some cidr in _cidrs
-	net.cidr_contains(cidr, input.target)
+	net.cidr_contains(cidr, _target)
 }
 
 # HTTP 请求：host 必须在授权域名清单里（精确匹配，不做后缀通配）。
 # 刻意不支持 *.example.com：通配会把"子域被第三方接管"变成越界入口。
 rules contains "http.allowed_host" if {
 	input.action == "http_request"
-	host := lower(object.get(input, "host", ""))
+	host := lower(_host)
 	some h in _hosts
 	host == lower(h)
 }

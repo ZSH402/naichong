@@ -18,4 +18,9 @@
   config:
     allowedHosts:
       - demo-appserver-livepaas.dingtalk.com
+      # 白盒作业要打本地跑的实例：traefik 的审计目标是自己起的服务，
+      # 不出网。加这两个是为了让 agent 的 curl / blackbox_probe 能到达 127.0.0.1，
+      # 否则它会被 secops 闸挡在连接前，把「配置阻断」误当成「目标拦住了」。
+      - 127.0.0.1
+      - localhost
     deniedTools: []

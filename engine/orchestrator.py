@@ -28,6 +28,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -1053,6 +1054,30 @@ def _install_scope_gate(st: dict) -> ScopeGate | None:
         return None
 
 
+def _dsh_cmd(ws: str, patch_flag: str, prompt_path: str) -> str:
+    """构造 dsh 启动命令。prompt 必须走 stdin，不能作为位置参数。
+
+    早先写的是 `... ./run.sh {PATCH}"$(cat "$NC_PROMPT_FILE")"`，
+    run.sh 再 `exec node ... "$@"` —— 于是**整个 prompt 变成 node 的命令行参数**。
+    后果三个，都在真机上出现过：
+
+      1. `ps` 能看到完整 prompt（多轮作业、含目标路径、含手法）
+      2. agent 自己执行 `pkill -f <目标二进制>` 时，pattern 匹配到命令行里含同样
+         字符串的 node / su 祖先进程，把自己的运行时连同编排器一起杀掉。
+         真机现场：traefik 白盒第 1 轮，log 停在 reasoning 中途，末行是
+         `session "...": flush on a closed handle`，整棵进程树消失
+      3. 长 prompt 逼近 ARG_MAX
+
+    headless profile 支持 `-` 读 stdin（`dsh --profile headless -`）。
+    重定向写在内层 `bash -c` 里，由内层 shell 打开文件，
+    不依赖 `su -c` 把外层 stdin 透传下去——那正是当初改成命令替换的原因。
+    """
+    return (
+        f"cd {PROJ} && PROFILE=headless WORKSPACE={shlex.quote(ws)} "
+        f"./run.sh {patch_flag} - < {shlex.quote(prompt_path)}"
+    )
+
+
 def run_round(st: dict, state_path: str) -> None:
     st["round"] += 1
     ws = os.path.join(WORK_ROOT, f"orch-{st['challenge']}-r{st['round']}-{int(time.time())}")
@@ -1115,9 +1140,7 @@ def run_round(st: dict, state_path: str) -> None:
 
     if st.get("supervised") and execlayer is not None and execlayer.available():
         r = execlayer.run(
-            ["su", "zsh", "-s", "/bin/bash", "-c",
-             f"cd {PROJ} && PROFILE=headless WORKSPACE='{ws}' ./run.sh {PATCH}"
-             f'"$(cat \"$NC_PROMPT_FILE\")"'],
+            ["su", "zsh", "-s", "/bin/bash", "-c", _dsh_cmd(ws, PATCH, prompt_path)],
             timeout=ROUND_WALL_SECONDS,
             idle=ROUND_IDLE_SECONDS,
             grace=GRACEFUL_SECONDS,
@@ -1143,9 +1166,7 @@ def run_round(st: dict, state_path: str) -> None:
             # run.sh 收到的 prompt 是碎的。表现是"轮次日志 0 字节、DSH 根本没起来"，
             # 而且全程不报错。环境变量传值没有解析环节，是唯一不会出这类问题的写法。
             proc = subprocess.Popen(
-                ["su", "zsh", "-s", "/bin/bash", "-c",
-                 f"cd {PROJ} && PROFILE=headless WORKSPACE='{ws}' ./run.sh {PATCH}"
-                 f'"$(cat "$NC_PROMPT_FILE")"'],
+                ["su", "zsh", "-s", "/bin/bash", "-c", _dsh_cmd(ws, PATCH, prompt_path)],
                 stdout=fh, stderr=subprocess.STDOUT, env=env, preexec_fn=os.setsid,
             )
             # 双判据轮询：总时长管"跑太久"，无输出管"卡死"。
