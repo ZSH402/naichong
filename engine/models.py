@@ -197,6 +197,29 @@ class RoundObservation(BaseModel):
     confidence: str = "speculative"    # speculative / likely / confirmed
 
 
+class Invariant(BaseModel):
+    """系统声称永远成立的性质。假设的生成源，不是结论。
+
+    为什么单列一类：实测 15 条假设里 13 条是「某接口是否缺某校验」这一个形状，
+    一条都没碰到状态机、资源归属、数据生命周期。根因不是模型不会抽象——
+    它写出过「X-Account-ID 是会话内账号一致性校验」这种不变量式的判断——
+    而是方法论只给了「漏洞类型清单」这一个槽位，模型就把所有思考塞进那个形状。
+
+    `exits` 是这个类型真正的价值所在：同一条不变量往往有好几个入口能触碰它。
+    真实教训是只测了 `GET /api/works/{id}/chapters/{n}` 被 403，就认定
+    「章节正文只有所有者能读」，而 AI 写作时拼上下文、搜索、导出、统计
+    这四个同样能读到正文的入口从未被测。**测一个出口就下结论，是这类误报的主因。**
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str = ""
+    statement: str = Field(min_length=8)   # 「章节正文只能由作品所有者读到」
+    stake: str = ""                        # 违反它谁获益、获益多少——没人获益的不用测
+    exits: list[str] = Field(default_factory=list)   # 能触碰这条不变量的所有入口
+    tested: list[str] = Field(default_factory=list)  # exits 里已经验过的
+
+
 class RoundResult(BaseModel):
     """一轮的产出，对应 ROUND.md 里的 ```json 块。
 
@@ -210,6 +233,8 @@ class RoundResult(BaseModel):
     # 没有这个字段时，模型在跑的过程中看到"奇怪但不确定"的东西只能咽回去——
     # 而横向联想恰恰是漏洞挖掘里最难被规则替代的部分。
     observations: list[RoundObservation] = Field(default_factory=list)
+    # 系统不变量。假设从这里长出来，而不是从漏洞类型清单里长出来。
+    invariants: list[Invariant] = Field(default_factory=list)
     conclusion: str = ""
     verdicts: list[Verdict] = Field(default_factory=list)
     excluded: list[Excluded] = Field(default_factory=list)
@@ -264,6 +289,9 @@ class StateView(BaseModel):
     deadline_ts: float = 0.0
     last_progress_round: int = 0
     hypotheses: list[Hypothesis] = Field(default_factory=list)
+    # 跨轮累积的系统不变量。这是"目标世界模型"的第一块实体，
+    # 有了它，后一轮的假设可以从未闭合的出口长出来，而不是重新拍脑袋。
+    invariants: list[Invariant] = Field(default_factory=list)
     last_summary: str = ""
     phase_switches: int = 0
     api_key: str = ""

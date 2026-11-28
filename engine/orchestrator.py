@@ -37,7 +37,7 @@ from datetime import datetime, timedelta, timezone
 from pydantic import ValidationError
 
 from observation import Observation, ObservationPool, parse_observations
-from models import Excluded, Hypothesis, RoundResult, StateView, check_stall
+from models import Excluded, Hypothesis, Invariant, RoundResult, StateView, check_stall
 from scopegate import Scope, ScopeGate
 from store import Store
 try:
@@ -500,6 +500,16 @@ def material_index(challenge: str, limit: int = 40) -> str:
     return "**附件索引**（只给了标识，按需取片段）\n" + "\n".join(rows[:limit])
 
 
+def _pick(obj, key, default=None):
+    """同字段双形态取值。
+
+    状态里的列表元素在内存中是 Pydantic 模型（excluded / invariants / observations），
+    从 JSON 读回来是 dict。`obj.get()` 只对后者成立——早先 build_prompt 直接
+    `e.evidence`，跑完两轮存盘后第三轮必 AttributeError，已踩一次。
+    """
+    return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+
+
 def build_prompt(st: dict) -> str:
     """本轮的任务书。刻意短——只带结论，不带历史日志。"""
     left = st["deadline_ts"] - time.time()
@@ -620,6 +630,30 @@ def build_prompt(st: dict) -> str:
             lines.append(f"- {path}{ev}")
         lines += ["", "回到这些路径上等于承认上一轮的结论是错的；"
                   "如果你确实要回头，先给出推翻原依据的新观测。", ""]
+
+    # 系统不变量：假设的生成源，比"已排除路径"更靠近上游。
+    #
+    # 加这一块的直接原因：真机 15 条假设里 13 条是「某接口是否缺某校验」，
+    # 一条都没碰状态机、资源归属、数据生命周期。不是模型不会想，是它没有可用的槽位——
+    # 「已排除」只告诉它别再走哪儿，不告诉它还能往哪儿长。
+    #
+    # 未测出口必须显式列出来。真实教训：只测了 chapters/{n} 被 403 就认定
+    # 「章节正文只有所有者能读」，而 AI 拼上下文、搜索、导出、统计这四个
+    # 同样读正文的入口从没进过测试范围。
+    invs = st.get("invariants") or []
+    if invs:
+        lines += ["## 系统不变量（假设从这里长，不从漏洞清单长）"]
+        for inv in invs[-12:]:
+            stmt = str(_pick(inv, "statement", ""))
+            stake = str(_pick(inv, "stake", ""))
+            exits = [str(x) for x in (_pick(inv, "exits", []) or [])]
+            tested = {str(x) for x in (_pick(inv, "tested", []) or [])}
+            untested = [e for e in exits if e not in tested]
+            lines.append(f"- {stmt}" + (f"（违反获益：{stake}）" if stake else ""))
+            if untested:
+                lines.append(f"  未测出口：{'、'.join(untested[:8])}")
+        lines += ["", "**只测了部分出口不等于验证过这条不变量。** 优先打未测出口，"
+                  "或在 ROUND.md 的 invariants 里补新的不变量。", ""]
 
     # 方法论先于领域：黑盒/白盒决定的是"凭什么下结论"，
     # 领域规格只决定"往哪儿看"。顺序反了会让领域细节盖过判定纪律。
@@ -772,6 +806,11 @@ def build_prompt(st: dict) -> str:
         '  "conclusion": "一句话：这轮有什么进展，或者卡在哪",',
         '  "verdicts": [{"id": "H1", "observation": "实测到了什么", "verdict": "refuted"}],',
         '  "excluded": [{"path": "哪条路走不通", "evidence": "依据（命令/地址/对照实验）"}],',
+        # 不变量放在 hypotheses 前面：顺序本身就是引导。
+        # 实测 15 条假设里 13 条都是「某接口是否缺某校验」这同一个形状，
+        # 一条没碰状态机、资源归属、数据生命周期——因为槽位里只给了 hypotheses。
+        '  "invariants": [{"statement": "系统承诺什么（一句断言，如「章节正文只能由作品所有者读到」）", '
+        '"stake": "违反它谁获益", "exits": ["能触碰这条不变量的所有入口"], "tested": ["已验证的入口"]}],',
         '  "hypotheses": [{"statement": "新假设", "falsify_by": "什么观测能证明它错", "origin": "从哪看出来的"}],',
         # 观察字段必须出现在**格式示例**里，否则模型不会写。
         # 实测：prompt 正文加了「你自己提假设」的引导，但示例 JSON 里没有
@@ -787,6 +826,8 @@ def build_prompt(st: dict) -> str:
         "- `verdict` 只能是 `confirmed` / `refuted` / `inconclusive` 三个值之一",
         "- 每条裁决必须有 `observation` —— **没有观测就没有裁决**",
         "- 每条假设必须有 `falsify_by`，且要具体到「一次实验就能否定」；写「待定」等于没提",
+        "- `invariants` 是假设的来源。**一条不变量只测了 `exits` 里的一个入口，不算验证过**——"
+        "把 `tested` 如实填上，下一轮会盯没测的出口",
         "- 字段缺失或类型不对会被判为格式错误，下一轮会点名要求你修正",
         "",
         "工作目录就是本轮的 workspace；目标材料（源码、配置、资产清单等）在 `/root/tpctf/attachments/<target>/`。",
@@ -938,6 +979,14 @@ def parse_round(ws: str) -> tuple[str, list[dict], bool, list[dict], list[dict]]
             "text": o.text, "where": o.where, "kind": o.kind, "confidence": o.confidence,
         })
 
+    # 不变量同样只进上下文池，不参与判定。
+    # 它的作用不是"发现"，是给下一轮一个比漏洞清单更宽的生成源。
+    for inv in getattr(rr, "invariants", []) or []:
+        _ROUND_INVARIANTS.append({
+            "statement": inv.statement, "stake": inv.stake,
+            "exits": inv.exits, "tested": inv.tested,
+        })
+
     problems = rr.assess()
     _ROUND_PROBLEMS.append(problems)
 
@@ -964,6 +1013,7 @@ def parse_round(ws: str) -> tuple[str, list[dict], bool, list[dict], list[dict]]
 # parse_round 的签名被多处调用，加返回值会牵动全部调用点。
 _ROUND_PROBLEMS: list[list[str]] = []
 _ROUND_OBSERVATIONS: list[dict] = []
+_ROUND_INVARIANTS: list[dict] = []
 
 
 def last_round_problems() -> list[str]:
@@ -1007,6 +1057,7 @@ def run_round(st: dict, state_path: str) -> None:
     st["round"] += 1
     ws = os.path.join(WORK_ROOT, f"orch-{st['challenge']}-r{st['round']}-{int(time.time())}")
     _ROUND_OBSERVATIONS.clear()
+    _ROUND_INVARIANTS.clear()
     gate = _install_scope_gate(st)
     if gate is not None:
         # action 必须是 connect / http_request / run_tool 三者之一，
@@ -1215,6 +1266,24 @@ def run_round(st: dict, state_path: str) -> None:
                 obs_list.append({**o, "round": st["round"]})
         st["observations"] = obs_list[-80:]   # 上限 80 条
         _ROUND_OBSERVATIONS.clear()
+
+    # 落盘本轮不变量。按 statement 去重：同一个承诺被反复写是常态，
+    # 但 exits / tested 要合并——新轮次可能补上没测过的出口，这才是价值所在。
+    if _ROUND_INVARIANTS:
+        inv_list = st.get("invariants") or []
+        by_stmt = {str(i.get("statement", "")): i for i in inv_list}
+        for inv in _ROUND_INVARIANTS:
+            key = str(inv.get("statement", ""))
+            if key in by_stmt:
+                cur = by_stmt[key]
+                cur["exits"] = sorted({*cur.get("exits", []), *inv.get("exits", [])})
+                cur["tested"] = sorted({*cur.get("tested", []), *inv.get("tested", [])})
+                if inv.get("stake") and not cur.get("stake"):
+                    cur["stake"] = inv["stake"]
+            else:
+                inv_list.append({**inv, "round": st["round"]})
+        st["invariants"] = inv_list[-40:]
+        _ROUND_INVARIANTS.clear()
 
     problems = last_round_problems()
     if problems:
