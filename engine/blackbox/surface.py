@@ -32,6 +32,8 @@ from .core import Response
 _PATH_RE = re.compile(r"""["'`](/[^"'`\s<>]{2,160})["'`]""")
 _URL_RE = re.compile(r"""["'`](https?://[^\s"'`<>]{4,200})["'`]""")
 _ACTION_RE = re.compile(r"""<form[^>]*action=["']([^"']+)["']""", re.I)
+# 外部脚本：现代 SPA 的路由全在这里，index.html 是空壳
+_SCRIPT_SRC = re.compile(r"""<script[^>]+src=["']([^"']+\.js[^"']*)["']""", re.I)
 _FETCH_RE = re.compile(r"""\b(?:fetch|axios\.\w+|\.open)\s*\(\s*["'`]([^"'`]{2,200})["'`]""")
 _PARAM_IN_URL = re.compile(r"[?&]([A-Za-z_][A-Za-z0-9_]{0,30})=")
 _PARAM_JSON = re.compile(r"""["']([A-Za-z_][A-Za-z0-9_]{1,30})["']\s*:""")
@@ -78,6 +80,9 @@ class Surface:
     endpoints: dict[str, Endpoint] = field(default_factory=dict)
     leaks: list[dict[str, str]] = field(default_factory=list)
     roles: dict[str, list[str]] = field(default_factory=dict)  # identity -> 可见端点
+    # 需要登录才能看到的入口。分开记，因为它含义完全不同：
+    # "目标没内容"是能力不足，"目标要求认证"是事实——后者要靠身份来解决。
+    auth_walls: list[str] = field(default_factory=list)
 
     def add(self, ep: Endpoint) -> None:
         cur = self.endpoints.get(ep.key)
@@ -96,6 +101,7 @@ class Surface:
             "endpoint_count": len(self.endpoints),
             "endpoints": [e.as_dict() for e in self.endpoints.values()][:200],
             "leaks": self.leaks[:30],
+            **({"auth_walls": self.auth_walls[:10]} if self.auth_walls else {}),
             "roles": {k: v[:40] for k, v in self.roles.items()},
         }
 
@@ -150,6 +156,71 @@ def harvest(response: Response, surface: Surface, *, method: str = "GET") -> int
             if matched and not any(x["match"] == matched for x in surface.leaks):
                 surface.leaks.append({"kind": kind, "match": matched, "url": response.url})
 
+    # JSON 响应也是资产：键名泄露数据模型，数组元素数泄露规模。
+    #
+    # 早先 harvest 只处理 HTML，12 个返回 JSON 的目标因此一个字段都没提取到。
+    # 而对 API 来说**键名就是线索**：`{code,data,msg}` 说明是统一包装，
+    # `{user_list,total}` 说明是分页接口，`{error:"unauthorized"}` 说明要认证。
+    ctype = (response.headers.get("content-type") or "").lower()
+    if "json" in ctype or (body.strip().startswith(("{", "[")) and body.strip().endswith(("}", "]"))):
+        try:
+            import json as _json
+            obj = _json.loads(body)
+            keys = response.json_keys()
+            if keys:
+                surface.leaks.append({
+                    "kind": "json-schema",
+                    "match": ",".join(keys[:12])[:180],
+                    "url": response.url,
+                })
+            if isinstance(obj, list):
+                surface.leaks.append({
+                    "kind": "json-array",
+                    "match": f"top-level array with {len(obj)} element(s)",
+                    "url": response.url,
+                })
+            # 错误体里的文案常泄露框架：{"detail":"Not authenticated"} 是 FastAPI
+            if isinstance(obj, dict):
+                blob = " ".join(str(v) for v in obj.values() if isinstance(v, str))[:300]
+                for fw, hint in (("fastapi", "Not authenticated"), ("django", "CSRF"),
+                                 ("spring", "Whitelabel"), ("express", "Cannot GET")):
+                    if hint.lower() in blob.lower():
+                        surface.leaks.append({"kind": "framework",
+                                              "match": f"{fw} error signature: {hint}",
+                                              "url": response.url})
+        except Exception:
+            pass
+
+    # 302 的 Location 是资产，不是"没抓到东西"。
+    #
+    # 实测：open-dev / ai-app 未登录时全部 302 到
+    # `login.dingtalk.com/oauth2/auth?redirect_uri=...`，body 为空。
+    # 早先 harvest 对空 body 什么都不产出，于是"需要登录"被报成"目标没内容"。
+    # 而那个 redirect_uri 正是 OAuth 攻击面的入口（白名单校验、原样回跳）。
+    loc = response.headers.get("location", "")
+    if loc:
+        from urllib.parse import urlparse as _up, parse_qs as _pq
+        try:
+            u = _up(loc)
+            if u.netloc and u.netloc != _up(surface.base).netloc:
+                surface.leaks.append({
+                    "kind": "redirect-target",
+                    "match": f"{u.scheme}://{u.netloc}{u.path}"[:160],
+                    "url": response.url,
+                })
+            qs = _pq(u.query)
+            for key in ("redirect_uri", "redirect_url", "return_url", "callback", "next"):
+                for v in qs.get(key, [])[:3]:
+                    surface.leaks.append({
+                        "kind": "redirect-param",
+                        "match": f"{key}={v}"[:200],
+                        "url": response.url,
+                    })
+            if u.path:
+                surface.add(Endpoint(method="GET", path=u.path or "/", source="redirect"))
+        except Exception:
+            pass
+
     # 按身份记录可见性
     surface.roles.setdefault(response.identity, [])
     for ep in surface.endpoints.values():
@@ -161,9 +232,91 @@ def harvest(response: Response, surface: Surface, *, method: str = "GET") -> int
     return len(surface.endpoints) - before
 
 
+def harvest_js(pool, identity: str, surface: Surface, html: str, page_url: str,
+               *, max_files: int = 6, max_bytes: int = 600_000) -> dict[str, Any]:
+    """从页面引用的外部 JS 里挖端点。
+
+    ## 为什么必须做这一步
+
+    `harvest()` 只解析**响应 HTML**。现代 SPA 的 index.html 是空壳，
+    所有路由写在 `chunk-xxxx.js` 里。实测三个真实目标（open-dev / preview /
+    ai-app）端点全部为 0，而自造靶机能提取 6 个——因为靶机的 HTML 里硬编码了
+    `<a href>`。**这是自造靶机验证的系统性盲区**：靶子太配合了。
+
+    ## 约束
+
+    只取同源脚本、只取 .js、限量（默认 6 个 / 单文件 600KB）。
+    真实站点的 chunk 动辄几十个，全拉会把一次测绘变成爬站。
+    """
+    from urllib.parse import urljoin, urlparse
+
+    srcs: list[str] = []
+    cross = 0
+    for m in _SCRIPT_SRC.finditer(html or ""):
+        u = urljoin(page_url, m.group(1).strip())
+        if urlparse(u).netloc != urlparse(page_url).netloc:
+            # 跨域脚本是第三方 CDN。**默认不拉**——那是授权范围之外的资产。
+            # 但要数清楚跳过几个：实测 www.dingtalk.com 的 4 个脚本全在
+            # g.alicdn.com 上，fetched=0 却没有任何解释，看起来像"这个站没有 JS"。
+            cross += 1
+            continue
+        if u not in srcs:
+            srcs.append(u)
+    srcs = srcs[:max_files]
+
+    stats = {
+        "scripts_found": len(_SCRIPT_SRC.findall(html or "")),
+        "skipped_cross_origin": cross,
+        "fetched": 0, "bytes": 0, "endpoints_added": 0,
+    }
+    before = len(surface.endpoints)
+
+    failed = 0
+    for u in srcs:
+        r = pool.send(identity, "GET", u)
+        if r.error or len(r.body) > max_bytes:
+            failed += 1
+            continue
+        stats["fetched"] += 1
+        stats["bytes"] += len(r.body)
+        body = r.body
+        # JS 里的路径：字符串字面量 + 模板串前缀
+        for m in re.finditer(r"""["'`](/[A-Za-z0-9_\-./~%{}*:]{3,120})["'`]""", body):
+            p = m.group(1).split("?")[0].split("#")[0]
+            if _looks_like_path(p):
+                surface.add(Endpoint(method="GET", path=p, source="js"))
+        # axios/fetch 的配置对象里常见的 baseURL 拼接
+        for m in re.finditer(r"""\burl\s*:\s*["'`]([^"'`]{3,160})["'`]""", body):
+            v = m.group(1)
+            if v.startswith("/"):
+                p = v.split("?")[0]
+                if _looks_like_path(p):
+                    surface.add(Endpoint(method="GET", path=p, source="js"))
+
+    stats["endpoints_added"] = len(surface.endpoints) - before
+    if failed:
+        stats["fetch_failed"] = failed
+    if cross and not srcs:
+        stats["note"] = ("all scripts are cross-origin (third-party CDN) and were skipped by default; "
+                         "routes live there but fetching them means touching assets outside this target")
+    return stats
+
+
 def _looks_like_path(p: str) -> bool:
     if len(p) < 3 or len(p) > 120:
         return False
+    # 解码后含 HTML/SVG 标签的不是路径，是被 URL 编码的片段。
+    # 实测从 JS 里抠出过 `/%3E%3C/svg%3E`（即 `/><svg>`），它被当成端点
+    # 打了一次 404——这类误报会污染端点清单，也会白白消耗请求配额。
+    try:
+        from urllib.parse import unquote as _uq
+        dec = _uq(p)
+        if any(ch in dec for ch in "<>\"'` ") or dec.strip() in ("/", ""):
+            return False
+        if _re.match(r"^/[A-Za-z][A-Za-z0-9]*=[^/]", dec):   # /foo=bar 更像参数片段
+            return False
+    except Exception:
+        pass
     if p.count("/") < 1:
         return False
     # 排除明显的资源与噪声

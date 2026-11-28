@@ -35,6 +35,7 @@ from datetime import datetime, timedelta, timezone
 
 from pydantic import ValidationError
 
+from observation import Observation, ObservationPool, parse_observations
 from models import Excluded, Hypothesis, RoundResult, StateView, check_stall
 from scopegate import Scope, ScopeGate
 from store import Store
@@ -339,6 +340,25 @@ def render_memory(st: StateView) -> str:
         for s_ in st.recent_summaries[-3:]:
             lines.append(f"- {s_}")
         lines.append("")
+    # ── 推理线索：传"为什么"，不只是"是什么"
+    #
+    # 早先 MEMORY.md 里只有结论（确认了什么、排除了什么、待验证什么）。
+    # 模型看不到"上一轮是什么让它怀疑这里"——而理解这个业务在做什么是最贵的一步，
+    # 每轮重建就等于每轮从零猜。
+    # Reflexion 的做法就是把"为什么失败"也存下来，这里同理存"为什么想到"。
+    obs_recent = (st.get("observations") or [])[-8:]
+    if obs_recent:
+        lines.append("## 最近的观察（未验证）")
+        lines.append("")
+        for o in obs_recent:
+            mark = {"confirmed": "✓", "likely": "~", "speculative": "?"}.get(
+                str(o.get("confidence", "speculative")), "?")
+            lines.append(f"- {mark} [{o.get('kind','note')}] {str(o.get('text',''))[:200]}")
+        lines.append("")
+        lines.append("> 这些是**观察**不是结论。但如果某条解释了当前的困惑，值得顺着看。")
+        lines.append("")
+
+
     return "\n".join(lines)
 
 
@@ -580,6 +600,23 @@ def build_prompt(st: dict) -> str:
         lines.append("- （无）")
     lines.append("")
 
+    # ── 让模型也提假设，不只是验证
+    #
+    # 早先"提假设"全是丞相（确定性代码）干的：盘哪些 claim 停在 hypothesis、
+    # 哪些资产没测。这套规则能穷举**已知的缺口**，但提不出"这个业务的实现
+    # 在什么条件下会不成立"——那需要读懂它在做什么。
+    #
+    # 这里不要求空想，而是给一个触发点：从你自己的观察里挑一条，问它
+    # "如果这条成立，会引出什么问题"。
+    lines += ["## 你自己提假设（不只是验证我给的）"]
+    lines += [
+        "除了下面列出的待验证项，**必须再提至少一条来自你自己观察的假设**。",
+        "写法：`origin` 填你从哪儿看出来的（哪条观察、哪个接口、哪次对比），",
+        "`falsify_by` 填什么样的观测能推翻它。",
+        "**说不清 origin 的假设不要提**——那是套话，不是假设。",
+        "",
+    ]
+
     lines += ["**待验证的假设**"]
     if len(open_h) > 6:
         lines.append(f"（共 {len(open_h)} 条，只列最近 6 条）")
@@ -590,6 +627,26 @@ def build_prompt(st: dict) -> str:
     if not open_h:
         lines.append("- （无）")
     lines.append("")
+    # 观察池：按三因子检索取前 8 条。**不是全量塞**——
+    # 全量会立刻炸掉上下文，而 Generative Agents 的做法就是按
+    # recency/importance/relevance 打分取 top-k。
+    obs_pool = ObservationPool(decay_half_life_s=1800.0)
+    for rec in (st.get("observations") or []):
+        try:
+            obs_pool.add(Observation(
+                text=str(rec.get("text", "")),
+                where=str(rec.get("where", "")),
+                kind=str(rec.get("kind", "note")),
+                confidence=str(rec.get("confidence", "speculative")),
+                round=int(rec.get("round", 0)),
+            ))
+        except Exception:
+            continue
+    query = " ".join([st.get("target", ""), st.get("domain", ""), st.get("phase", "")])
+    block = obs_pool.render_block(query, 8)
+    if block:
+        lines += [block, ""]
+
     if idx:
         lines += [idx, ""]
     if st.get("last_summary"):
@@ -812,6 +869,12 @@ def parse_round(ws: str) -> tuple[str, list[dict], bool, list[dict], list[dict]]
         hyps, progress, verdicts = parse_round_legacy(text)
         return (text[:600], hyps, progress, verdicts, [])
 
+    # 观察单独收集：不参与 assess（不计入质量问题），只进上下文池
+    for o in getattr(rr, "observations", []) or []:
+        _ROUND_OBSERVATIONS.append({
+            "text": o.text, "where": o.where, "kind": o.kind, "confidence": o.confidence,
+        })
+
     problems = rr.assess()
     _ROUND_PROBLEMS.append(problems)
 
@@ -837,6 +900,7 @@ def parse_round(ws: str) -> tuple[str, list[dict], bool, list[dict], list[dict]]
 # 最近一次 parse_round 的格式问题（空列表=合格）。用模块级列表是因为
 # parse_round 的签名被多处调用，加返回值会牵动全部调用点。
 _ROUND_PROBLEMS: list[list[str]] = []
+_ROUND_OBSERVATIONS: list[dict] = []
 
 
 def last_round_problems() -> list[str]:
@@ -879,6 +943,7 @@ def _install_scope_gate(st: dict) -> ScopeGate | None:
 def run_round(st: dict, state_path: str) -> None:
     st["round"] += 1
     ws = os.path.join(WORK_ROOT, f"orch-{st['challenge']}-r{st['round']}-{int(time.time())}")
+    _ROUND_OBSERVATIONS.clear()
     gate = _install_scope_gate(st)
     if gate is not None:
         # action 必须是 connect / http_request / run_tool 三者之一，
@@ -1073,6 +1138,17 @@ def run_round(st: dict, state_path: str) -> None:
         open_by_id.pop(target, None)   # 一条假设只被裁决一次
         judged += 1
     st["verdicts_total"] = st.get("verdicts_total", 0) + judged
+    # 落盘本轮观察（去重、限量：池子无限长，但状态文件不能无限长）
+    new_obs = [o for o in _ROUND_OBSERVATIONS]
+    if new_obs:
+        st.setdefault("observations", [])
+        existing = {str(o.get("text", "")) for o in st["observations"]}
+        for o in new_obs:
+            if str(o.get("text", "")) not in existing:
+                st["observations"].append({**o, "round": st["round"]})
+        st["observations"] = st["observations"][-80:]   # 上限 80 条
+        _ROUND_OBSERVATIONS.clear()
+
     problems = last_round_problems()
     if problems:
         st["format_errors"] = (st.get("format_errors") or []) + problems

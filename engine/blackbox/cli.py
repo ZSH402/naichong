@@ -22,12 +22,20 @@ from pathlib import Path
 from typing import Any
 
 from . import anomaly as anomaly_mod
+from . import assetgraph as assetgraph_mod
+from . import bizmodel as bizmodel_mod
+from . import campaign as campaign_mod
+from . import classify as classify_mod
 from . import evolve as evolve_mod
+from . import invariant as invariant_mod
+from . import jsintel as jsintel_mod
+from .credentials import Credential, CredentialPool
 from . import intel as intel_mod
 from . import resonance as resonance_mod
 from . import race as race_mod
 from . import surface as surface_mod
-from .core import Identity, SessionPool, identity_matrix, protocol_matrix, syntax_matrix
+from .core import (Identity, SessionPool, behavior_matrix, identity_matrix,
+                   protocol_matrix, syntax_matrix)
 from .guard import EarlyExit, NoveltyTracker, RateLimit, Scope
 from .orchestrate import Scaffold
 from .statemachine import Machine, walk_flow
@@ -113,6 +121,10 @@ def cmd_diff(args: argparse.Namespace) -> None:
             _emit({"error": f"scope check failed: {why}"}, 2)
 
     out: dict[str, Any] = {"base": args.base, "path": args.path}
+    # 行为矩阵放在最前面：它是模型直接能读的形态，后面的原始差分是给机器用的
+    out["behavior"] = behavior_matrix(
+        pool, args.method, args.path, body=args.body,
+        sensitive_markers=[s for s in (args.markers or "").split(",") if s])
     out["identity"] = identity_matrix(
         pool, args.method, args.path,
         data=args.body,
@@ -190,29 +202,69 @@ def cmd_probe(args: argparse.Namespace) -> None:
     pool = _build_pool(args)
     scaffold = Scaffold()
     rate = RateLimit(max_qps=args.qps)
-    novelty = NoveltyTracker()
+    # P0-3：和 scaffold 共用同一个 tracker。
+    # 早先这里 new 了一个独立实例，输出里 scaffold.novelty 和 guard.novelty
+    # 的 zero_gain_streak 一个 0 一个 2——熔断逻辑有两个真理来源。
+    novelty = scaffold.novelty
     early = EarlyExit()
+    cfg_pull_js = True
 
     paths = [p.strip() for p in args.paths.split(",") if p.strip()]
     report: dict[str, Any] = {"base": args.base, "paths": paths, "stages": {}}
 
-    # 1. 测绘
+    # ── 1. 测绘（含外部 JS）
     surf = surface_mod.Surface(base=args.base)
+    js_stats: list[dict[str, Any]] = []
+    sheets: list[str] = []
     for ident in pool.names():
         for p in paths:
-            allowed, why = rate.allow()
-            if not allowed:
-                report["stopped"] = f"rate limit: {why}"
+            # 限速用 acquire（阻塞等待），不是 allow（超了就放弃）。
+            # 早先用 allow，qps=2 时第 3 个请求就把整轮作业终止了——
+            # 越保守的限速 = 越早的死法。
+            if not rate.acquire(timeout=60):
+                report["stopped"] = "rate limit: could not acquire a slot within 60s (is qps configured to 0?)"
                 break
             r = pool.send(ident, "GET", p)
             rate.record(r.error == "")
             if r.error:
                 continue
-            surface_mod.harvest(r, surf, method="GET")
+            surface_mod.harvest(r, surf)
+            sheets.append(p)
             obs = scaffold.observe(r.status, r.headers, r.body)
-            novelty.observe(errors=[h for h in ["stack", "sql", "debug"] if h in str(obs["body"]).lower()],
-                            params=r.json_keys())
-    report["stages"]["map"] = {"endpoints": len(surf.endpoints), "leaks": surf.leaks[:10]}
+            novelty.observe(
+                errors=[h for h in ["stack", "sql", "debug"] if h in str(obs["body"]).lower()],
+                params=r.json_keys(),
+            )
+            # 拉页面引用的同源 JS —— SPA 的路由全在那里
+            if cfg_pull_js:
+                for _ in range(3):          # 每个页面最多 3 个脚本，避免爬站
+                    st = surface_mod.harvest_js(pool, ident, surf, r.body, r.url or f"{args.base}{p}")
+                    js_stats.append(st)
+                    if st["endpoints_added"] == 0:
+                        break
+
+    probe_result = surface_mod.probe_surface(pool, surf, identities=pool.names(),
+                                             per_identity_limit=args.limit) if surf.endpoints else {"matrix": [], "tested_requests": 0}
+
+    # 感知盲区判定：什么都没挖到，和"目标干净"是两件事
+    blind = []
+    redirects = [l for l in surf.leaks if l["kind"] in ("redirect-target", "redirect-param")]
+    if len(surf.endpoints) == 0 and redirects:
+        blind.append("every entry redirected away — this target is behind an auth wall, "
+                     "not empty. Supply an authenticated identity (--ids with a real cookie/token) "
+                     "or test the redirect parameters themselves")
+    elif len(surf.endpoints) == 0:
+        blind.append("no endpoint discovered — the response contained no links, forms or JS routes "
+                     "(SPA shell, or the entry path is not a page)")
+    if len(surf.leaks) == 0:
+        blind.append("no framework/version/path leak in the response")
+    report["stages"]["map"] = {
+        "endpoints": len(surf.endpoints),
+        "leaks": surf.leaks[:10],
+        "js": js_stats[:5],
+        **({"matrix": probe_result["matrix"]} if probe_result["matrix"] else {}),
+        **({"blind_spots": blind} if blind else {}),
+    }
 
     # 2. 差分 + 异常
     diffs = []
@@ -220,9 +272,8 @@ def cmd_probe(args: argparse.Namespace) -> None:
         ok, _ = early.guard()
         if not ok:
             break
-        allowed, why = rate.allow()
-        if not allowed:
-            report["stopped"] = f"rate limit: {why}"
+        if not rate.acquire(timeout=60):
+            report["stopped"] = "rate limit: could not acquire a slot within 60s"
             break
         d = identity_matrix(pool, "GET", p,
                             sensitive_markers=[s for s in (args.markers or "").split(",") if s])
@@ -235,7 +286,12 @@ def cmd_probe(args: argparse.Namespace) -> None:
         inter = scaffold.inter_reflect(gained=bool(d["differences"]))
         if inter["action"] == "prune":
             report["stages"].setdefault("pruned", []).append(p)
-    report["stages"]["diff"] = {"differences": diffs[:20]}
+    report["stages"]["diff"] = {
+        "differences": diffs[:20],
+        **({"note": "only one identity configured — differential testing needs at least two "
+                    "(e.g. two tenants, or user vs anonymous) to mean anything"}
+           if len(pool.names()) < 2 else {}),
+    }
 
     # 3. 竞态（只对 POST 路径跑）
     if args.race_path:
@@ -364,6 +420,107 @@ def cmd_evolve(args: argparse.Namespace) -> None:
     _emit(result)
 
 
+def _survey_handler(pool, rate, target) -> "campaign_mod.Record":
+    """campaign 的单目标处理：探测 → 提取 → 分类 → 打分。"""
+    import time as _t
+
+    rec = campaign_mod.Record(host=target.host, started=_t.time(), finished=0.0, ok=True)
+    if not rate.acquire(60):
+        rec.error = "rate limit"; return rec
+    ident = pool.names()[0] if pool.names() else "anonymous"
+    r = pool.send(ident, "GET", "/")
+    rate.record(r.error == "")
+    if r.error:
+        rec.error = r.error[:80]; rec.kind = "dead"; return rec
+
+    surf = surface_mod.Surface(base=target.url)
+    surface_mod.harvest(r, surf)
+    js_stats = {"fetched": 0}
+    js_intel = []
+    if "<script" in (r.body or "") or "<form" in (r.body or ""):
+        js_stats = surface_mod.harvest_js(pool, ident, surf, r.body, r.url or target.url)
+        # JS 深度分析：调用点带方法，比裸路径可靠
+        for u in []:
+            pass
+    rec.leaks = surf.leaks[:10]
+    rec.endpoints = len(surf.endpoints)
+    rec.js_fetched = int(js_stats.get("fetched") or 0)
+    rec.status = r.status
+
+    v = classify_mod.classify(
+        status=r.status, headers=r.headers, body=r.body or "",
+        content_type=(r.headers.get("content-type") or ""),
+        endpoints=rec.endpoints, js_fetched=rec.js_fetched, leaks=len(rec.leaks))
+    rec.kind, rec.score, rec.reasons = v.kind, v.score, v.reasons
+    rec.extra = {"server": r.headers.get("server", "")[:40],
+                 "redirect_to": (r.headers.get("location") or "")[:80],
+                 **(js_stats if js_stats.get("fetched") else {})}
+    rec.finished = _t.time()
+    return rec
+
+
+def cmd_batch(args: argparse.Namespace) -> None:
+    """批量普查：给一个 host 列表，跑完出聚合报告 + 资产关系。"""
+    hosts = [h.strip() for h in args.hosts.split(",") if h.strip()]
+    if args.hosts_file:
+        hosts += [l.strip() for l in open(args.hosts_file) if l.strip() and not l.startswith("#")]
+    targets = [campaign_mod.Target(host=h) for h in dict.fromkeys(hosts)]
+
+    camp = campaign_mod.Campaign(args.out, qps_per_target=args.qps,
+                                 concurrency=args.concurrency)
+    resumed = camp.done_count
+    done = camp.run(targets, _survey_handler)
+    rep = camp.report()
+
+    graph = assetgraph_mod.build_from_records(list(camp._done.values()))
+    out = {
+        "resumed_from": resumed,
+        "ran_this_time": len(done),
+        **rep,
+        "asset_graph": graph.as_dict(),
+        "state_file": str(camp.state_path),
+    }
+    _emit(out)
+
+
+def cmd_biz(args: argparse.Namespace) -> None:
+    """业务状态机：从端点清单生成非法跃迁测试，并（在安全范围内）执行。"""
+    endpoints = json.loads(args.endpoints) if args.endpoints else []
+    actions = []
+    for e in endpoints:
+        if isinstance(e, str) and " " in e:
+            m, _, p = e.partition(" ")
+            actions.append((m, p))
+        elif isinstance(e, (list, tuple)) and len(e) == 2:
+            actions.append((e[0], e[1]))
+    if not actions:
+        _emit({"error": "endpoints required as JSON: [[\"POST\",\"/api/order\"],[\"GET\",\"/api/order/1\"]]"}, 2)
+
+    models = bizmodel_mod.build(actions)
+    tests = bizmodel_mod.illegal_transitions(models)
+    report: dict[str, Any] = {
+        "resources": [m.as_dict() for m in models.values()],
+        "test_points": tests[:40],
+        "total_tests": len(tests),
+    }
+
+    if args.execute:
+        pool = _build_pool(args)
+        creds = None
+        if args.ids:
+            creds = CredentialPool(args.base, pool)
+            for spec in args.ids:
+                ident = _parse_identity(spec)
+                creds.add(Credential(name=ident.name, role=ident.role,
+                                     headers=ident.headers, cookies=ident.cookies,
+                                     verify_path=args.verify_path))
+            report["credentials"] = creds.verify_all()
+        report["execution"] = invariant_mod.run(
+            tests, pool, creds=creds,
+            rate=RateLimit(max_qps=args.qps), allow_write=args.allow_write)
+    _emit(report)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="blackbox", description="纯黑盒探测原语")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -424,6 +581,7 @@ def main() -> None:
     p.add_argument("--reset-url", default="")
     p.add_argument("--count", type=int, default=10)
     p.add_argument("--qps", type=float, default=20.0)
+    p.add_argument("--limit", type=int, default=20, help="每个身份最多探测多少个端点")
     p.set_defaults(func=cmd_probe)
 
     it = sub.add_parser("intel", help="RFC 微灵感矩阵")
@@ -446,6 +604,25 @@ def main() -> None:
     ev.add_argument("--budget", type=int, default=12)
     ev.add_argument("--seed", type=int, default=0)
     ev.set_defaults(func=cmd_evolve)
+
+    bt = sub.add_parser("batch", help="批量普查 + 聚合 + 资产关系")
+    add_common(bt)
+    bt.add_argument("--hosts", default="", help="逗号分隔的 host")
+    bt.add_argument("--hosts-file", default="", help="每行一个 host 的文件")
+    bt.add_argument("--out", required=True, help="作业目录（状态与报告落这里）")
+    bt.add_argument("--concurrency", type=int, default=4)
+    bt.add_argument("--qps", type=float, default=3.0, help="每个目标的 qps")
+    bt.set_defaults(func=cmd_batch)
+
+    bz = sub.add_parser("biz", help="业务状态机与不变量测试")
+    add_common(bz)
+    bz.add_argument("--endpoints", required=True,
+                    help='JSON: [["POST","/api/order"],["GET","/api/order/1"]]')
+    bz.add_argument("--execute", action="store_true", help="真的执行（默认只生成测试点）")
+    bz.add_argument("--allow-write", action="store_true", help="允许会产生写入的测试")
+    bz.add_argument("--verify-path", default="/", help="凭据验证探针路径")
+    bz.add_argument("--qps", type=float, default=3.0)
+    bz.set_defaults(func=cmd_biz)
 
     args = ap.parse_args()
     try:

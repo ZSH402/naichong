@@ -301,6 +301,64 @@ def identity_matrix(pool: SessionPool, method: str, path: str, *,
     }
 
 
+def behavior_matrix(pool: SessionPool, method: str, path: str, *,
+                    params: dict[str, Any] | None = None,
+                    body: Any = None,
+                    probe_headers: dict[str, str] | None = None,
+                    sensitive_markers: Iterable[str] = ()) -> dict[str, Any]:
+    """一次请求 × 全部身份的完整行为矩阵 —— 「探索」而不是「验证」。
+
+    与 `identity_matrix` 的区别不是代码，是**用途**：
+      identity_matrix 回答"哪个身份和哪个身份不一样"（用于验证某条越权假设）
+      behavior_matrix  回答"这个端点对身份敏感吗，敏感在哪一层"（用于发现假设）
+
+    后者的输出刻意做成模型能直接读的表：每一行是一个身份，
+    列是这个身份看到的状态码、字段数、长度量级、是否看到了别人的标记。
+    **模型不需要自己发请求再比对——那是它最容易出错的地方**（我实测里
+    两次把"参数被携带"读成"参数被接受"，都是手工比对造成的）。
+    """
+    names = pool.names()
+    rows = []
+    for n in names:
+        r = pool.send(n, method, path, params=params, data=body, headers=probe_headers)
+        rows.append({
+            "identity": n,
+            "status": r.status,
+            "keys": len(r.json_keys()),
+            "key_names": r.json_keys()[:10],
+            "length": len(r.body or ""),
+            "leaked": r.sensitive_hits(sensitive_markers),
+            "error": r.error[:60] if r.error else "",
+        })
+
+    # 归纳：哪些维度对身份敏感
+    statuses = {row["status"] for row in rows if not row["error"]}
+    keycounts = {row["keys"] for row in rows if not row["error"]}
+    leaks = [row for row in rows if row["leaked"]]
+
+    signals = []
+    if len(statuses) > 1:
+        signals.append(f"状态码随身份变化：{sorted(statuses)} → 存在身份相关分支")
+    if len(keycounts) > 1:
+        signals.append(f"返回字段数随身份变化：{sorted(keycounts)} → 数据可见性按身份裁剪")
+    if leaks:
+        signals.append(f"跨身份标记泄露：{[(r['identity'], r['leaked']) for r in leaks]}")
+
+    return {
+        "endpoint": f"{method} {path}",
+        "identities": len(names),
+        "rows": rows,
+        "sensitive_to_identity": bool(signals),
+        "signals": signals,
+        "how_to_read": (
+            "每一行是一个身份对同一请求的观测。若 `sensitive_to_identity` 为真，"
+            "说明这个端点的行为依赖身份——**但依赖身份本身不是漏洞**，"
+            "关键看差异是否合理（管理员看到更多字段是设计，普通用户看到别人的数据才是问题）。"
+            "下一步：用同一对象在多个身份下分别请求，看谁的数据被谁看到了。"
+        ),
+    }
+
+
 # 语法维的变异器。全部是"同一个语义、不同的书写"，用来撞解析歧义。
 SYNTAX_VARIANTS: list[tuple[str, dict[str, Any] | list[tuple[str, Any]]]] = [
     ("duplicate-key", [("id", "1"), ("id", "2")]),

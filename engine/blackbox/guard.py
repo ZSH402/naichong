@@ -86,6 +86,27 @@ class RateLimit:
     _error_run: int = 0
     _slowdown: float = 1.0
 
+    def acquire(self, timeout: float = 60.0) -> bool:
+        """阻塞直到拿到一个配额，或超时。
+
+        为什么需要这个：`allow()` 返回 False 只是"这一瞬间超了"，
+        而调用方（probe 主循环）拿到 False 就 `break` 把整个作业标成 stopped——
+        于是 qps 调得越保守，作业死得越快（实测 qps=2 时第 3 个请求就终止）。
+
+        限速的语义应该是**推迟**，不是**放弃**。这里用一个短的 sleep 轮询，
+        拿到配额返回 True；真等了 timeout 还没slot 才返回 False（那种情况
+        通常意味着调用方把 qps 配成了 0 或者别的地方出了问题）。
+        """
+        import time as _t
+
+        deadline = _t.time() + timeout
+        while _t.time() < deadline:
+            ok, _why = self.allow()
+            if ok:
+                return True
+            _t.sleep(0.1)
+        return False
+
     def allow(self) -> tuple[bool, str]:
         now = time.time()
         if now - self._window_start >= 1.0:

@@ -148,6 +148,10 @@ class Hypothesis(BaseModel):
     status: HypothesisStatus = "open"
     evidence: str = ""
     quality: Quality | None = None
+    # 这条假设是从哪来的。**空着不算错，但会降低质量分**——
+    # 说不清来源的假设多半是套话（"可能存在越权"）。
+    # 允许的写法：观察描述 / 接口路径 / 上一轮的排除项。
+    origin: str = ""
 
     @field_validator("falsify_by")
     @classmethod
@@ -178,6 +182,21 @@ class Hypothesis(BaseModel):
         return getattr(self, key, default)
 
 
+class RoundObservation(BaseModel):
+    """一条观察。**不是证据**，是模型觉得自己看到了什么。
+
+    单独成类型而不是塞进 hypothesis，因为两者的可信度完全不同：
+    hypothesis 是可证伪的断言（要配 falsify_by），observation 只是"注意到了"。
+    混在一起的后果是模型会把自己的猜测当成待验证事实继续推论。
+    """
+    model_config = ConfigDict(extra="allow")
+
+    text: str = Field(min_length=6)
+    where: str = ""
+    kind: str = "note"                 # anomaly / pattern / question / seed / note
+    confidence: str = "speculative"    # speculative / likely / confirmed
+
+
 class RoundResult(BaseModel):
     """一轮的产出，对应 ROUND.md 里的 ```json 块。
 
@@ -187,6 +206,10 @@ class RoundResult(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
+    # 模型主动交回的观察。**不参与任何判定**，只进下一轮的上下文。
+    # 没有这个字段时，模型在跑的过程中看到"奇怪但不确定"的东西只能咽回去——
+    # 而横向联想恰恰是漏洞挖掘里最难被规则替代的部分。
+    observations: list[RoundObservation] = Field(default_factory=list)
     conclusion: str = ""
     verdicts: list[Verdict] = Field(default_factory=list)
     excluded: list[Excluded] = Field(default_factory=list)
